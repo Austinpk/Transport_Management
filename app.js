@@ -548,7 +548,7 @@
       toast('Entry created', 'success');
       if (data.sendSms && data.phoneNumber) {
         const feeText = data.bookingFee ? ' بکنگ فیس: ' + data.bookingFee : '';
-        const msg =  'نوید 923481496487' +'رضوان جٹ ٹرانسپورٹ گروپ +923446731002' + 'آپ کی بلٹی بک ہو گئی ہے۔' + feeText + ' ہماری ٹرانسپورٹ سروس استعمال کرنے کا شکریہ۔';
+        const msg ='آپ کی بلٹی بک ہو گئی ہے۔' + feeText + ' ہماری ٹرانسپورٹ سروس استعمال کرنے کا شکریہ۔' + 'رضوان جٹ ٹرانسپورٹ گروپ 923446731002'+'نوید 03481496487';
         sendSmsToDriver(data.phoneNumber, msg);
       }
       e.target.reset();
