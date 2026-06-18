@@ -504,6 +504,30 @@
     finally { setLoading(false); }
   };
 
+  // ===== sendSmsToDriver: opens SMS app with pre-filled message =====
+  const sendSmsToDriver = (phone, message) => {
+    if (!phone) return;
+    // Clean phone number - remove spaces/dashes
+    const cleanPhone = String(phone).replace(/[\s\-]/g, '');
+    try {
+      // Try sms: link first (works on mobile and some desktops)
+      const smsLink = document.createElement('a');
+      smsLink.href = 'sms:' + cleanPhone + '?body=' + encodeURIComponent(message);
+      smsLink.style.display = 'none';
+      document.body.appendChild(smsLink);
+      smsLink.click();
+      document.body.removeChild(smsLink);
+    } catch (err) {
+      console.warn('SMS link failed:', err);
+      // Fallback: copy message to clipboard
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(message).then(() => {
+          toast('SMS message copied to clipboard', 'info');
+        }).catch(() => {});
+      }
+    }
+  };
+
   const handleAddEntry = async (e) => {
     e.preventDefault();
     const data = {
