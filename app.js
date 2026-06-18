@@ -1,5 +1,6 @@
 /**
- * TMS - Transport Management System
+ * TMS - Transport Management System v4.0
+ * Clean ES6+ module pattern
  */
 (() => {
   'use strict';
@@ -27,45 +28,29 @@
   const screens = {
     auth: $('#authScreen'),
     dashboard: $('#dashboardScreen'),
+    weightman: $('#weightmanScreen'),
+    distributor: $('#distributorScreen'),
     admin: $('#adminScreen')
   };
   const overlay = $('#loadingOverlay');
 
   const showScreen = (name) => {
-    // Hide ALL screens first
     Object.keys(screens).forEach(key => {
-      if (screens[key]) {
-        screens[key].style.display = 'none';
-        screens[key].hidden = true;
-      }
+      if (screens[key]) { screens[key].style.display = 'none'; screens[key].hidden = true; }
     });
-    // Show only the requested screen
-    if (screens[name]) {
-      screens[name].style.display = '';
-      screens[name].hidden = false;
-    }
+    if (screens[name]) { screens[name].style.display = ''; screens[name].hidden = false; }
   };
 
-  const setLoading = (isLoading) => {
-    overlay.classList.toggle('hidden', !isLoading);
-  };
+  const setLoading = (isLoading) => overlay.classList.toggle('hidden', !isLoading);
 
   const toast = (message, type = 'info') => {
     const container = $('#toastContainer');
-    const icons = {
-      success: 'fa-circle-check',
-      error: 'fa-circle-xmark',
-      warning: 'fa-triangle-exclamation',
-      info: 'fa-circle-info'
-    };
+    const icons = { success: 'fa-circle-check', error: 'fa-circle-xmark', warning: 'fa-triangle-exclamation', info: 'fa-circle-info' };
     const el = document.createElement('div');
     el.className = 'toast ' + type;
     el.innerHTML = '<i class="fa-solid ' + (icons[type] || icons.info) + '"></i><span>' + message + '</span>';
     container.appendChild(el);
-    setTimeout(() => {
-      el.style.animation = 'slideIn 0.3s reverse';
-      setTimeout(() => el.remove(), 300);
-    }, 3500);
+    setTimeout(() => { el.style.animation = 'slideIn 0.3s reverse'; setTimeout(() => el.remove(), 300); }, 3500);
   };
 
   const escapeHtml = (str) => {
@@ -77,16 +62,23 @@
 
   const formatDate = (d) => {
     if (!d) return '—';
-    try {
-      const date = new Date(d);
-      return date.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
-    } catch (e) { return '—'; }
+    try { return new Date(d).toLocaleString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); }
+    catch (e) { return '—'; }
+  };
+
+  const formatDateShort = (d) => {
+    if (!d) return '—';
+    try { return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); }
+    catch (e) { return '—'; }
   };
 
   const statusClass = (status) => {
     const s = String(status || '').toLowerCase();
     if (s.includes('deliver')) return 'delivered';
     if (s.includes('transit')) return 'transit';
+    if (s.includes('loading')) return 'loading';
+    if (s.includes('approved')) return 'approved';
+    if (s.includes('paid')) return 'paid';
     if (s.includes('pending')) return 'pending';
     if (s.includes('active') || s === 'approved') return 'active';
     if (s.includes('disable') || s === 'disabled') return 'disabled';
@@ -100,37 +92,39 @@
       const data = JSON.parse(raw);
       if (data && data.role === 'Admin') return data;
       return null;
-    } catch (e) {
-      localStorage.removeItem('tms_admin_session');
-      return null;
-    }
+    } catch (e) { localStorage.removeItem('tms_admin_session'); return null; }
   };
 
+  // ===== UPDATED: callAppsScript with token passthrough =====
   const callAppsScript = async (action, payload = {}) => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30000);
-
+    
     try {
-      const requestBody = {
+      const requestBody = { 
         action: action,
         ...payload
       };
-
+      
       const adminSession = getAdminSession();
       if (adminSession) {
         requestBody.adminKey = CONFIG.adminKey;
         requestBody.callerName = adminSession.displayName;
       } else if (auth.currentUser) {
-        try {
-          const idToken = await auth.currentUser.getIdToken();
-          requestBody.token = idToken;
-        } catch (e) {
-          console.warn('Could not get Firebase token:', e);
+        // Only add token if one wasn't already provided in the payload
+        // (e.g., registration sends its own token)
+        if (!payload.token) {
+          try { 
+            requestBody.token = await auth.currentUser.getIdToken(); 
+          } catch (e) {
+            console.warn('Could not get Firebase token:', e);
+          }
         }
+        // else keep the token that came in payload
       }
-
+      
       console.log('📤 Sending:', action, requestBody);
-
+      
       const response = await fetch(CONFIG.appsScriptUrl, {
         method: 'POST',
         mode: 'cors',
@@ -138,29 +132,25 @@
         body: JSON.stringify(requestBody),
         signal: controller.signal
       });
-
-      console.log('📥 Status:', response.status);
-
-      if (!response.ok) {
-        throw new Error('HTTP ' + response.status + ': ' + response.statusText);
-      }
-
+      
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      
       const text = await response.text();
-      console.log('📦 Response:', text);
-
+      console.log('📥 Response:', text);
+      
       let data;
       try { data = JSON.parse(text); }
       catch (e) { throw new Error('Invalid JSON response from server'); }
-
+      
       if (data && data.success === false) {
-        throw new Error(data.error || data.message || 'Request failed');
+        throw new Error(data.error || 'Request failed');
       }
       return data;
     } catch (err) {
       console.error('❌ API Error:', err);
       if (err.name === 'AbortError') throw new Error('Request timed out');
       if (err.message.includes('Failed to fetch')) {
-        throw new Error('Cannot connect to server. Check deployment settings.');
+        throw new Error('Cannot connect to server');
       }
       throw err;
     } finally {
@@ -168,6 +158,7 @@
     }
   };
 
+  // ============ AUTH ============
   const switchTab = (tab) => {
     $$('.tab-btn').forEach(b => {
       const isActive = b.dataset.tab === tab;
@@ -185,22 +176,19 @@
     $$('[required]', form).forEach(input => {
       const errEl = $('.error-msg[data-for="' + input.id + '"]', form);
       if (!input.value.trim()) {
-        if (errEl) errEl.textContent = 'This field is required';
+        if (errEl) errEl.textContent = 'Required';
         valid = false;
       } else if (input.id === 'loginEmail') {
         const value = input.value.trim();
         if (value !== 'Admin' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
-          if (errEl) errEl.textContent = 'Please enter a valid email or username';
+          if (errEl) errEl.textContent = 'Valid email required';
           valid = false;
         }
       } else if (input.type === 'email' && input.id !== 'loginEmail') {
         if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.value)) {
-          if (errEl) errEl.textContent = 'Please enter a valid email';
+          if (errEl) errEl.textContent = 'Valid email required';
           valid = false;
         }
-      } else if (input.type === 'password' && input.minLength > 0 && input.value.length < input.minLength) {
-        if (errEl) errEl.textContent = 'Minimum ' + input.minLength + ' characters';
-        valid = false;
       }
     });
     return valid;
@@ -210,70 +198,45 @@
     e.preventDefault();
     const form = e.target;
     if (!validateForm(form)) return;
-
     const emailOrUsername = $('#loginEmail').value.trim();
     const password = $('#loginPassword').value;
     const btn = $('button[type="submit"]', form);
     const originalBtnText = btn.innerHTML;
     btn.disabled = true;
     btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Signing in...';
-
     try {
       setLoading(true);
-      console.log('🔐 Login attempt for:', emailOrUsername);
-
       if (emailOrUsername === 'Admin') {
-        console.log('👑 Admin login detected');
-
         const response = await fetch(CONFIG.appsScriptUrl, {
-          method: 'POST',
-          mode: 'cors',
+          method: 'POST', mode: 'cors',
           headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-          body: JSON.stringify({
-            action: 'checkStatus',
-            email: emailOrUsername,
-            password: password
-          })
+          body: JSON.stringify({ action: 'checkStatus', email: emailOrUsername, password: password })
         });
-
-        console.log('📥 Admin response status:', response.status);
-
-        if (!response.ok) {
-          throw new Error('Server responded with ' + response.status);
-        }
-
+        if (!response.ok) throw new Error('Server ' + response.status);
         const data = await response.json();
-        console.log('📦 Admin response data:', data);
-
         if (data.success && data.role === 'Admin') {
           const adminData = {
             uid: 'ADMIN_HARDCODE_UID',
             email: 'admin@system.local',
             displayName: data.name || 'Naveed Admin',
             role: 'Admin',
-            status: 'Approved'
+            status: 'Approved',
+            accountType: 'Admin'
           };
-
           localStorage.setItem('tms_admin_session', JSON.stringify(adminData));
-
           $('#adminUserName').textContent = adminData.displayName;
           showScreen('admin');
           await loadAdminData();
           toast('Welcome Admin!', 'success');
         } else {
-          throw new Error(data.error || 'Invalid admin credentials');
+          throw new Error(data.error || 'Invalid credentials');
         }
       } else {
         const cred = await auth.signInWithEmailAndPassword(emailOrUsername, password);
-        await notifyBackendAuth(cred.user, 'login');
+        await notifyBackendAuth(cred.user, 'checkStatus');
       }
     } catch (err) {
-      console.error('❌ Login error:', err);
-      if (err.message.includes('Failed to fetch') || err.message.includes('NetworkError')) {
-        toast('Cannot connect to server. Check your internet or Apps Script URL.', 'error');
-      } else {
-        toast(err.message || 'Authentication failed. Please try again.', 'error');
-      }
+      toast(err.message || 'Login failed', 'error');
     } finally {
       btn.disabled = false;
       btn.innerHTML = originalBtnText;
@@ -281,14 +244,19 @@
     }
   };
 
+  // ===== UPDATED: handleRegister – only send token, no uid =====
   const handleRegister = async (e) => {
     e.preventDefault();
     const form = e.target;
     if (!validateForm(form)) return;
-
+    
     const name = $('#regName').value.trim();
     const email = $('#regEmail').value.trim();
+    const phone = $('#regPhone').value.trim();
     const password = $('#regPassword').value;
+    const accountType = $('#regAccountType').value;
+    const shopName = $('#regShopName').value.trim();
+    
     const btn = $('button[type="submit"]', form);
     btn.disabled = true;
 
@@ -298,13 +266,18 @@
       const cred = await auth.createUserWithEmailAndPassword(email, password);
       await cred.user.updateProfile({ displayName: name });
       
-      // Then register in backend
+      // Get ID token – we will pass it in the payload
       const idToken = await cred.user.getIdToken();
+      
+      // Register in backend – send token and user data (uid will be derived from token)
       const res = await callAppsScript('register', {
-        uid: cred.user.uid,
         email: email,
         name: name,
-        token: idToken
+        phone: phone,
+        accountType: accountType,
+        shopName: shopName,
+        token: idToken,   // token will be used by backend to verify and get uid
+        uid: cred.user.uid    // explicit uid fallback in case token lookup is slow
       });
       
       toast('Account created! Awaiting admin approval.', 'success');
@@ -319,111 +292,69 @@
     }
   };
 
-  const notifyBackendAuth = async (user, action, extra = {}) => {
-    try {
-      const idToken = await user.getIdToken();
-      const res = await callAppsScript(action, {
-        uid: user.uid,
-        email: user.email,
-        name: user.displayName || extra.name || '',
-        token: idToken
-      });
-      routeByRole(res);
-    } catch (err) {
-      console.error('Backend sync error:', err);
-      toast(err.message || 'Failed to sync with server', 'error');
-      await auth.signOut();
-    }
-  };
-
   const routeByRole = (response) => {
     const role = (response && (response.role || (response.data && response.data.role)) || '').toLowerCase();
     const status = (response && (response.status || (response.data && response.data.status)) || '').toLowerCase();
+    const accountType = (response && (response.accountType || (response.data && response.data.accountType))) || 'Operator';
     const name = (response && (response.name || (response.data && response.data.name))) || (auth.currentUser && auth.currentUser.displayName) || 'User';
+    if (status === 'disabled' || status === 'suspended') { toast('Account disabled', 'error'); auth.signOut(); return; }
+    if (status === 'pending') { toast('Awaiting approval', 'warning'); auth.signOut(); return; }
 
-    if (status === 'disabled' || status === 'suspended') {
-      toast('Your account has been disabled. Contact admin.', 'error');
-      auth.signOut();
-      return;
+    if (role === 'admin') {
+      $('#adminUserName').textContent = name;
+      showScreen('admin');
+      loadAdminData();
+    } else if (accountType === 'Weightman') {
+      $('#weightUserName').textContent = name;
+      showScreen('weightman');
+      loadWeightmanData();
+    } else if (accountType === 'Distributor') {
+      $('#distUserName').textContent = name;
+      showScreen('distributor');
+      loadDistributorData();
+    } else {
+      $('#dashUserName').textContent = name;
+      $('#dashUserRole').textContent = accountType || 'Operator';
+      showScreen('dashboard');
+      loadOperatorData();
     }
-    if (status === 'pending') {
-      toast('Your account is pending admin approval.', 'warning');
-      auth.signOut();
-      return;
-    }
-
-    // Hide auth screen first
-    showScreen('auth');
-    setTimeout(() => {
-      if (role === 'admin') {
-        $('#adminUserName').textContent = name;
-        showScreen('admin');
-        loadAdminData();
-      } else {
-        $('#dashUserName').textContent = name;
-        showScreen('dashboard');
-        loadOperatorData();
-      }
-    }, 100);
   };
 
   const handleLogout = () => {
     localStorage.removeItem('tms_admin_session');
-    const banner = $('#adminErrorBanner');
-    if (banner) banner.remove();
-    
     if (auth.currentUser) {
-      auth.signOut().then(() => {
-        toast('Signed out successfully', 'success');
-      }).catch(err => {
-        console.error('Logout error:', err);
-      });
+      auth.signOut().then(() => toast('Signed out', 'success')).catch(() => {});
     } else {
-      toast('Signed out successfully', 'success');
+      toast('Signed out', 'success');
     }
-    
     showScreen('auth');
   };
 
+  // ============ PAGE LOAD ============
   document.addEventListener('DOMContentLoaded', async () => {
     const savedAdmin = localStorage.getItem('tms_admin_session');
     if (savedAdmin) {
       try {
         const adminData = JSON.parse(savedAdmin);
         if (adminData.role === 'Admin') {
-          console.log('👑 Admin session restored from localStorage');
           $('#adminUserName').textContent = adminData.displayName || 'Admin';
           showScreen('admin');
-          
-          try {
-            await loadAdminData();
-          } catch (err) {
-            console.error('Failed to load admin data:', err);
-          }
+          try { await loadAdminData(); } catch (err) { console.error(err); }
           setLoading(false);
           return;
         }
-      } catch (e) {
-        localStorage.removeItem('tms_admin_session');
-      }
+      } catch (e) { localStorage.removeItem('tms_admin_session'); }
     }
-
     auth.onAuthStateChanged(async (user) => {
       if (user) {
         try {
           setLoading(true);
-          const res = await callAppsScript('checkStatus', {
-            uid: user.uid,
-            token: await user.getIdToken()
-          });
+          const res = await callAppsScript('checkStatus', { uid: user.uid, token: await user.getIdToken() });
           routeByRole(res);
         } catch (err) {
-          console.error('Auth state error:', err);
-          toast('Session check failed: ' + err.message, 'error');
+          toast('Session failed: ' + err.message, 'error');
           await auth.signOut();
-        } finally {
-          setLoading(false);
-        }
+        } finally { setLoading(false); }
       } else {
         showScreen('auth');
         setLoading(false);
@@ -431,140 +362,372 @@
     });
   });
 
+  // ============ OPERATOR DASHBOARD ============
   let selectedEntries = new Set();
+  let allEntriesCache = [];
 
   const switchDashView = (view) => {
-    $$('#dashboardScreen .sidebar-nav .nav-item').forEach(n => {
-      n.classList.toggle('active', n.dataset.view === view);
-    });
+    $$('#dashboardScreen .sidebar-nav .nav-item').forEach(n => n.classList.toggle('active', n.dataset.view === view));
     $$('#dashboardScreen .view').forEach(v => v.classList.remove('active'));
     const target = $('#' + view + 'View');
     if (target) target.classList.add('active');
-    $('#dashTitle').textContent = view === 'entries' ? 'My Entries' : 'New Entry';
+    const titles = { entries: 'My Entries', add: 'New Entry', blacklist: 'Blacklist' };
+    $('#dashTitle').textContent = titles[view] || 'My Entries';
+    if (view === 'blacklist') loadBlacklist();
+  };
+
+  const getDateFilter = () => {
+    const filter = $('#dateFilter').value;
+    if (filter === 'custom') return $('#customDate').value || 'today';
+    return filter;
   };
 
   const loadOperatorData = async () => {
     try {
-      const res = await callAppsScript('getEntries', {});
-      const entries = (res && (res.data || res.entries)) || [];
-      renderEntries(entries);
-      renderStats(entries);
-    } catch (err) {
-      console.error('Load entries error:', err);
-      toast('Failed to load entries: ' + err.message, 'error');
-    }
+      const dateFilter = getDateFilter();
+      const res = await callAppsScript('getEntries', { dateFilter: dateFilter });
+      allEntriesCache = (res && (res.data || res.entries)) || [];
+      renderEntries(allEntriesCache);
+      renderStats(allEntriesCache);
+    } catch (err) { toast('Load failed: ' + err.message, 'error'); }
   };
 
   const renderStats = (entries) => {
     $('#statTotal').textContent = entries.length;
-    $('#statDelivered').textContent = entries.filter(e => /delivered/i.test(e.status || e.Status || e.MessageStatus)).length;
-    $('#statTransit').textContent = entries.filter(e => /transit/i.test(e.status || e.Status || e.MessageStatus)).length;
-    $('#statPending').textContent = entries.filter(e => /pending/i.test(e.status || e.Status || e.MessageStatus)).length;
+    $('#statDelivered').textContent = entries.filter(e => /delivered/i.test(e.Status)).length;
+    $('#statTransit').textContent = entries.filter(e => /transit/i.test(e.Status)).length;
+    $('#statPending').textContent = entries.filter(e => /pending/i.test(e.Status)).length;
   };
 
   const renderEntries = (entries) => {
-  const tbody = $('#entriesTbody');
-  if (!entries.length) {
-    tbody.innerHTML = '<tr><td colspan="7" class="empty-state"><i class="fa-solid fa-inbox"></i> No entries yet. Create your first one!</td></tr>';
-    return;
-  }
-  tbody.innerHTML = entries.map(e => {
-    const id = escapeHtml(e.id || e.EntryID || '');
-    const trucking = escapeHtml(e.truckingNo || e.TruckingNo || e.TruckPlate || '—');
-    const driver = escapeHtml(e.driverName || e.DriverName || '—');
-    const phone = escapeHtml(e.phoneNumber || e.PhoneNumber || '—');
-    const status = escapeHtml(e.status || e.Status || e.MessageStatus || 'Pending');
-    const date = formatDate(e.date || e.Timestamp || e.createdAt);
-    return '<tr data-id="' + id + '">' +
-      '<td><input type="checkbox" class="row-check" data-id="' + id + '" /></td>' +
-      '<td><strong>' + trucking + '</strong></td>' +
-      '<td>' + driver + '</td>' +
-      '<td>' + phone + '</td>' +
-      '<td><span class="status-pill ' + statusClass(status) + '">' + status + '</span></td>' +
-      '<td>' + date + '</td>' +
-      '<td class="actions-cell">' +
-        '<button class="btn-icon danger delete-btn" data-id="' + id + '" title="Delete"><i class="fa-solid fa-trash"></i></button>' +
-      '</td>' +
-    '</tr>';
-  }).join('');
-};
+    const tbody = $('#entriesTbody');
+    if (!entries.length) {
+      tbody.innerHTML = '<tr><td colspan="10" class="empty-state"><i class="fa-solid fa-inbox"></i> No entries yet</td></tr>';
+      return;
+    }
+    tbody.innerHTML = entries.map(e => {
+      const id = escapeHtml(e.EntryID || '');
+      const plate = escapeHtml(e.TruckPlate || '—');
+      const driver = escapeHtml(e.DriverName || '—');
+      const phone = escapeHtml(e.PhoneNumber || '—');
+      const address = escapeHtml(e.Address || '—');
+      const status = escapeHtml(e.Status || 'Pending');
+      const booked = formatDate(e.PendingTime || e.Timestamp);
+      const transit = formatDate(e.TransitTime);
+      const delivered = formatDate(e.DeliveredTime);
+      const phoneLink = e.PhoneNumber ? '<a href="tel:' + escapeHtml(e.PhoneNumber) + '" class="phone-link" title="Call"><i class="fa-solid fa-phone"></i></a>' : '';
+      const smsLink = e.PhoneNumber ? '<a href="sms:' + escapeHtml(e.PhoneNumber) + '" class="btn-icon phone" title="SMS"><i class="fa-solid fa-message"></i></a>' : '';
+
+      return '<tr data-id="' + id + '">' +
+        '<td><input type="checkbox" class="row-check" data-id="' + id + '" /></td>' +
+        '<td><strong>' + plate + '</strong></td>' +
+        '<td>' + driver + '</td>' +
+        '<td>' + phone + ' ' + phoneLink + ' ' + smsLink + '</td>' +
+        '<td>' + address + '</td>' +
+        '<td><div class="status-buttons">' +
+          '<button class="status-btn pending' + (status === 'Pending' ? ' active' : '') + '" data-id="' + id + '" data-status="Pending">Pending<span class="time-label">' + (e.PendingTime ? formatDateShort(e.PendingTime) : '') + '</span></button>' +
+          '<button class="status-btn transit' + (status === 'Transit' ? ' active' : '') + '" data-id="' + id + '" data-status="Transit">Transit<span class="time-label">' + (e.TransitTime ? formatDateShort(e.TransitTime) : '') + '</span></button>' +
+          '<button class="status-btn delivered' + (status === 'Delivered' ? ' active' : '') + '" data-id="' + id + '" data-status="Delivered">Delivered<span class="time-label">' + (e.DeliveredTime ? formatDateShort(e.DeliveredTime) : '') + '</span></button>' +
+        '</div></td>' +
+        '<td>' + booked + '</td>' +
+        '<td>' + transit + '</td>' +
+        '<td>' + delivered + '</td>' +
+        '<td class="actions-cell"><button class="btn-icon danger delete-btn" data-id="' + id + '" title="Delete"><i class="fa-solid fa-trash"></i></button></td>' +
+      '</tr>';
+    }).join('');
+  };
 
   const updateBulkBtn = () => {
-    const count = selectedEntries.size;
-    $('#selectedCount').textContent = count;
-    $('#bulkDeleteBtn').disabled = count === 0;
+    $('#selectedCount').textContent = selectedEntries.size;
+    $('#bulkDeleteBtn').disabled = selectedEntries.size === 0;
   };
 
   const handleDeleteEntry = async (id) => {
-    if (!confirm('Delete this entry? This action cannot be undone.')) return;
+    if (!confirm('Delete this entry?')) return;
     try {
       setLoading(true);
       await callAppsScript('deleteEntries', { entryIds: [id] });
-      toast('Entry deleted', 'success');
+      toast('Deleted', 'success');
       selectedEntries.delete(id);
       await loadOperatorData();
       updateBulkBtn();
-    } catch (err) {
-      toast('Delete failed: ' + err.message, 'error');
-    } finally {
-      setLoading(false);
-    }
+    } catch (err) { toast('Delete failed: ' + err.message, 'error'); }
+    finally { setLoading(false); }
   };
 
   const handleBulkDelete = async () => {
     if (selectedEntries.size === 0) return;
-    if (!confirm('Delete ' + selectedEntries.size + ' selected entries?')) return;
+    if (!confirm('Delete ' + selectedEntries.size + ' entries?')) return;
     try {
       setLoading(true);
       await callAppsScript('deleteEntries', { entryIds: [...selectedEntries] });
-      toast(selectedEntries.size + ' entries deleted', 'success');
+      toast('Deleted', 'success');
       selectedEntries.clear();
       await loadOperatorData();
       updateBulkBtn();
+    } catch (err) { toast('Delete failed: ' + err.message, 'error'); }
+    finally { setLoading(false); }
+  };
+
+  const handleUpdateStatus = async (entryId, newStatus) => {
+    try {
+      setLoading(true);
+      await callAppsScript('updateEntryStatus', { entryId: entryId, newStatus: newStatus });
+      toast('Status updated to ' + newStatus, 'success');
+      if (newStatus === 'Delivered') {
+        const entry = allEntriesCache.find(e => e.EntryID === entryId);
+        if (entry && entry.PhoneNumber) {
+          const msg = 'آپ کا سامان منزل پر پہنچ گیا ہے۔ شکریہ۔';
+          sendSmsToDriver(entry.PhoneNumber, msg);
+        }
+      }
+      await loadOperatorData();
+    } catch (err) { toast('Update failed: ' + err.message, 'error'); }
+    finally { setLoading(false); }
+  };
+
+  const handleAddEntry = async (e) => {
+    e.preventDefault();
+    const data = {
+      truckPlate: $('#truckPlate').value.trim(),
+      driverName: $('#driverName').value.trim(),
+      phoneNumber: $('#phoneNumber').value.trim(),
+      address: $('#address').value.trim(),
+      bookingFee: $('#bookingFee').value.trim(),
+      sendSms: $('#sendSms').checked
+    };
+    if (!data.truckPlate || !data.driverName || !data.phoneNumber) {
+      toast('Please fill required fields', 'warning');
+      return;
+    }
+    try {
+      setLoading(true);
+      await callAppsScript('addEntry', data);
+      toast('Entry created', 'success');
+      if (data.sendSms && data.phoneNumber) {
+        const feeText = data.bookingFee ? ' بکنگ فیس: ' + data.bookingFee : '';
+        const msg = 'آپ کی بھٹی بک ہو گئی ہے۔' + feeText + ' ہماری ٹرانسپورٹ سروس استعمال کرنے کا شکریہ۔';
+        sendSmsToDriver(data.phoneNumber, msg);
+      }
+      e.target.reset();
+      switchDashView('entries');
+      await loadOperatorData();
     } catch (err) {
-      toast('Bulk delete failed: ' + err.message, 'error');
+      if (err.message && err.message.includes('BLACKLISTED:')) {
+        const reason = err.message.split('BLACKLISTED:')[1];
+        $('#blModalPlate').textContent = data.truckPlate;
+        $('#blModalReason').textContent = reason;
+        $('#blacklistModal').hidden = false;
+      } else {
+        toast('Failed: ' + err.message, 'error');
+      }
+    } finally { setLoading(false); }
+  };
+
+  // ============ WEIGHTMAN ============
+  const switchWeightView = (view) => {
+    $$('#weightmanScreen .sidebar-nav .nav-item').forEach(n => n.classList.toggle('active', n.dataset.view === view));
+    $$('#weightmanScreen .view').forEach(v => v.classList.remove('active'));
+    const target = $('#' + view + 'View');
+    if (target) target.classList.add('active');
+    const titles = { weightEntries: 'My Weight Entries', addWeight: 'Add Weight Entry' };
+    $('#weightTitle').textContent = titles[view] || 'Weight Entries';
+  };
+
+  const loadWeightmanData = async () => {
+    try {
+      const res = await callAppsScript('getWeightEntries', {});
+      const entries = (res && (res.data || res.entries)) || [];
+      renderWeightEntries(entries);
+    } catch (err) { toast('Load failed: ' + err.message, 'error'); }
+  };
+
+  const renderWeightEntries = (entries) => {
+    const tbody = $('#weightEntriesTbody');
+    if (!entries.length) {
+      tbody.innerHTML = '<tr><td colspan="10" class="empty-state">No entries yet</td></tr>';
+      return;
+    }
+    tbody.innerHTML = entries.map(e => {
+      const status = escapeHtml(e.Status || 'Pending');
+      return '<tr>' +
+        '<td><strong>' + escapeHtml(e.TruckPlate) + '</strong></td>' +
+        '<td>' + escapeHtml(e.DriverName) + '</td>' +
+        '<td>' + escapeHtml(e.PhoneNumber) + '</td>' +
+        '<td><span class="status-pill ' + statusClass(status) + '">' + status + '</span></td>' +
+        '<td>' + formatDate(e.PendingTime) + '</td>' +
+        '<td>' + formatDate(e.PaidTime) + '</td>' +
+        '<td>' + formatDate(e.ApprovedTime) + '</td>' +
+        '<td>' + formatDate(e.LoadingTime) + '</td>' +
+        '<td>' + formatDate(e.TransitTime) + '</td>' +
+        '<td>' + formatDate(e.DeliveredTime) + '</td>' +
+      '</tr>';
+    }).join('');
+  };
+
+  const handleAddWeightEntry = async (e) => {
+    e.preventDefault();
+    
+    const truckPlate = $('#wTruckPlate').value.trim();
+    const driverName = $('#wDriverName').value.trim();
+    const phoneNumber = $('#wPhoneNumber').value.trim();
+    const address = $('#wAddress').value.trim();
+    
+    console.log('Weight form values:', { truckPlate, driverName, phoneNumber, address });
+    
+    if (!truckPlate) {
+      toast('Truck Plate is required', 'warning');
+      $('#wTruckPlate').focus();
+      return;
+    }
+    if (!driverName) {
+      toast('Driver Name is required', 'warning');
+      $('#wDriverName').focus();
+      return;
+    }
+    if (!phoneNumber) {
+      toast('Phone Number is required', 'warning');
+      $('#wPhoneNumber').focus();
+      return;
+    }
+    
+    const data = {
+      truckPlate: truckPlate,
+      driverName: driverName,
+      phoneNumber: phoneNumber,
+      address: address
+    };
+    
+    try {
+      setLoading(true);
+      await callAppsScript('addWeightEntry', data);
+      toast('Weight entry added successfully', 'success');
+      e.target.reset();
+      switchWeightView('weightEntries');
+      await loadWeightmanData();
+    } catch (err) {
+      console.error('Add weight entry error:', err);
+      if (err.message && err.message.includes('BLACKLISTED:')) {
+        const reason = err.message.split('BLACKLISTED:')[1];
+        $('#blModalPlate').textContent = truckPlate;
+        $('#blModalReason').textContent = reason;
+        $('#blacklistModal').hidden = false;
+      } else {
+        toast('Failed: ' + err.message, 'error');
+      }
     } finally {
       setLoading(false);
     }
   };
 
-  const handleAddEntry = async (e) => {
-  e.preventDefault();
-  const data = {
-    truckingNo: $('#truckingNo').value.trim(),
-    driverName: $('#driverName').value.trim(),
-    phoneNumber: $('#phoneNumber').value.trim(),
-    sendSms: $('#sendSms').checked
+  // ============ DISTRIBUTOR ============
+  let distSelected = new Set();
+
+  const switchDistView = (view) => {
+    $$('#distributorScreen .sidebar-nav .nav-item').forEach(n => n.classList.toggle('active', n.dataset.view === view));
+    $$('#distributorScreen .view').forEach(v => v.classList.remove('active'));
+    const target = $('#' + view + 'View');
+    if (target) target.classList.add('active');
+    const titles = { distList: 'Approved List', distSent: 'Sent Requests' };
+    $('#distTitle').textContent = titles[view] || 'Approved List';
+    if (view === 'distSent') loadDistSent();
   };
-  if (!data.truckingNo || !data.driverName || !data.phoneNumber) {
-    toast('Please fill all required fields', 'warning');
-    return;
-  }
-  try {
-    setLoading(true);
-    await callAppsScript('addEntry', data);
-    toast('Entry created successfully', 'success');
-    e.target.reset();
-    switchDashView('entries');
-    await loadOperatorData();
-  } catch (err) {
-    toast('Failed to create entry: ' + err.message, 'error');
-  } finally {
-    setLoading(false);
-  }
-};
+
+  const loadDistributorData = async () => {
+    try {
+      const res = await callAppsScript('getDistributorList', {});
+      const entries = (res && (res.data || res.entries)) || [];
+      renderDistList(entries);
+    } catch (err) { 
+      toast('Load failed: ' + err.message, 'error'); 
+    }
+  };
+
+  const renderDistList = (entries) => {
+    const tbody = $('#distListTbody');
+    if (!entries.length) {
+      tbody.innerHTML = '<tr><td colspan="10" class="empty-state">No approved entries</td></tr>';
+      return;
+    }
+    tbody.innerHTML = entries.map(e => {
+      const id = escapeHtml(e.entryId);
+      const phoneLink = e.phoneNumber ? '<a href="tel:' + escapeHtml(e.phoneNumber) + '" class="phone-link"><i class="fa-solid fa-phone"></i></a>' : '';
+      return '<tr data-id="' + id + '">' +
+        '<td><input type="checkbox" class="dist-check" data-id="' + id + '" /></td>' +
+        '<td><strong>' + escapeHtml(e.truckPlate) + '</strong></td>' +
+        '<td>' + escapeHtml(e.driverName) + '</td>' +
+        '<td>' + escapeHtml(e.phoneNumber) + ' ' + phoneLink + '</td>' +
+        '<td>' + escapeHtml(e.shopName || '—') + '</td>' +
+        '<td>' + escapeHtml(e.operatorName) + '</td>' +
+        '<td>' + formatDate(e.pendingTime) + '</td>' +
+        '<td>' + formatDate(e.approvedTime) + '</td>' +
+        '<td>' + (e.distributorNotified ? '<span class="status-pill active">Yes</span>' : '<span class="status-pill pending">No</span>') + '</td>' +
+        '<td><button class="btn btn-success btn-sm send-sms-btn" data-id="' + id + '" data-phone="' + escapeHtml(e.phoneNumber) + '"><i class="fa-solid fa-paper-plane"></i> SMS</button></td>' +
+      '</tr>';
+    }).join('');
+  };
+
+  const loadDistSent = async () => {
+    try {
+      const res = await callAppsScript('getLoadingGroups', {});
+      const groups = (res && (res.data || res.groups)) || [];
+      const tbody = $('#distSentTbody');
+      if (!groups.length) { tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No groups</td></tr>'; return; }
+      tbody.innerHTML = groups.map(g => '<tr><td>' + escapeHtml(g.groupId) + '</td><td>' + formatDate(g.timestamp) + '</td><td>' + g.drivers.length + ' drivers</td><td>' + (g.messageSent ? '<span class="status-pill active">Yes</span>' : '<span class="status-pill pending">No</span>') + '</td></tr>').join('');
+    } catch (err) { toast('Load failed: ' + err.message, 'error'); }
+  };
+
+  const sendDistSms = async (entryId, phone) => {
+    if (!phone) { toast('No phone number', 'warning'); return; }
+    const msg = 'لوڈنگ کے لیے اپنی گاڑی تیار کریں۔ شکریہ۔';
+    try {
+      await callAppsScript('sendLoadingSMS', { entryIds: [entryId], message: msg });
+      sendSmsToDriver(phone, msg);
+      toast('SMS sent', 'success');
+    } catch (err) { toast('Failed: ' + err.message, 'error'); }
+  };
+
+  const sendBulkDistSms = async () => {
+    if (distSelected.size === 0) { toast('Select entries first', 'warning'); return; }
+    const msg = 'لوڈنگ کے لیے اپنی گاڑی تیار کریں۔ شکریہ۔';
+    try {
+      setLoading(true);
+      await callAppsScript('sendLoadingSMS', { entryIds: [...distSelected], message: msg });
+      const entries = allEntriesCache.filter(e => distSelected.has(e.entryId));
+      entries.forEach(e => { if (e.phoneNumber) sendSmsToDriver(e.phoneNumber, msg); });
+      toast('SMS sent to ' + distSelected.size + ' drivers', 'success');
+      distSelected.clear();
+      await loadDistributorData();
+    } catch (err) { toast('Failed: ' + err.message, 'error'); }
+    finally { setLoading(false); }
+  };
+
+  // ============ ADMIN ============
+  let pendingSelected = new Set();
+  let approvedSelected = new Set();
+
   const switchAdminView = (view) => {
-    $$('#adminScreen .sidebar-nav .nav-item').forEach(n => {
-      n.classList.toggle('active', n.dataset.view === view);
-    });
+    $$('#adminScreen .sidebar-nav .nav-item').forEach(n => n.classList.toggle('active', n.dataset.view === view));
     $$('#adminScreen .view').forEach(v => v.classList.remove('active'));
     const target = $('#' + view + 'View');
     if (target) target.classList.add('active');
-    $('#adminTitle').textContent = view === 'users' ? 'User Management' : 'Global Entries';
+    const titles = {
+      users: 'User Management', pending: 'Pending (Weight)', approved: 'Approved List',
+      loading: 'Loading Queue', transit: 'In Transit', delivered: 'Delivered',
+      global: 'Operator Entries', activities: 'User Activities'
+    };
+    $('#adminTitle').textContent = titles[view] || 'Admin';
+    if (view === 'pending') loadPendingEntries();
+    if (view === 'approved') loadApprovedList();
+    if (view === 'loading') loadLoadingQueue();
+    if (view === 'transit') loadTransitList();
+    if (view === 'delivered') loadDeliveredList();
+    if (view === 'global') loadGlobalEntries();
+    if (view === 'activities') loadActivities();
   };
 
   const loadAdminData = async () => {
-    await Promise.all([loadUsers(), loadGlobalEntries()]);
+    await Promise.all([loadUsers(), loadPendingEntries()]);
   };
 
   const loadUsers = async () => {
@@ -572,45 +735,55 @@
       const res = await callAppsScript('getUsers', {});
       const users = (res && (res.data || res.users)) || [];
       renderUsers(users);
-    } catch (err) {
-      console.error('Load users error:', err);
-      throw err;
-    }
+    } catch (err) { toast('Load failed: ' + err.message, 'error'); }
   };
 
   const renderUsers = (users) => {
-  const tbody = $('#usersTbody');
-  if (!users.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No users found</td></tr>';
-    return;
-  }
-  tbody.innerHTML = users.map(u => {
-    const st = (u.status || 'pending').toLowerCase();
-    const isPending = st === 'pending';
-    const isDisabled = st === 'disabled' || st === 'suspended';
-    
-    let actionBtn;
-    if (isPending) {
-      // Show Approve button for pending users
-      actionBtn = '<button class="btn btn-success btn-sm approve-btn" data-id="' + escapeHtml(u.uid || u.id) + '"><i class="fa-solid fa-check"></i> Approve</button>';
-    } else if (isDisabled) {
-      // Show Approve button for disabled users
-      actionBtn = '<button class="btn btn-success btn-sm approve-btn" data-id="' + escapeHtml(u.uid || u.id) + '"><i class="fa-solid fa-check"></i> Approve</button>';
-    } else {
-      // Show Disable button for approved/active users
-      actionBtn = '<button class="btn btn-danger btn-sm disable-btn" data-id="' + escapeHtml(u.uid || u.id) + '"><i class="fa-solid fa-ban"></i> Disable</button>';
-    }
-    
-    return '<tr data-id="' + escapeHtml(u.uid || u.id) + '">' +
-      '<td><strong>' + escapeHtml(u.name || '—') + '</strong></td>' +
-      '<td>' + escapeHtml(u.email || '—') + '</td>' +
-      '<td><span class="badge ' + (u.role === 'admin' ? 'admin' : '') + '">' + escapeHtml(u.role || 'operator') + '</span></td>' +
-      '<td><span class="status-pill ' + statusClass(u.status) + '">' + escapeHtml(u.status || 'pending') + '</span></td>' +
-      '<td>' + formatDate(u.createdAt || u.registered) + '</td>' +
-      '<td class="actions-cell">' + actionBtn + '</td>' +
-    '</tr>';
-  }).join('');
-};
+    const tbody = $('#usersTbody');
+    if (!users.length) { tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No users</td></tr>'; return; }
+    tbody.innerHTML = users.map(u => {
+      const uid = escapeHtml(u.uid || '');
+      const st = (u.status || 'pending').toLowerCase();
+      const isDisabled = st === 'disabled' || st === 'suspended';
+      const isPending = st === 'pending';
+      let actionBtn;
+      if (isPending || isDisabled) {
+        actionBtn = '<button class="btn btn-success btn-sm approve-btn" data-id="' + uid + '"><i class="fa-solid fa-check"></i> Approve</button>';
+      } else {
+        actionBtn = '<button class="btn btn-danger btn-sm disable-btn" data-id="' + uid + '"><i class="fa-solid fa-ban"></i> Disable</button>';
+      }
+      return '<tr><td><a href="#" class="user-name-link" data-uid="' + uid + '"><strong>' + escapeHtml(u.name || '—') + '</strong></a></td><td>' + escapeHtml(u.email || '—') + '</td><td><span class="badge">' + escapeHtml(u.accountType || 'Operator') + '</span></td><td><span class="badge ' + (u.role === 'Admin' ? 'admin' : '') + '">' + escapeHtml(u.role || 'operator') + '</span></td><td><span class="status-pill ' + statusClass(u.status) + '">' + escapeHtml(u.status || 'pending') + '</span></td><td>' + formatDateShort(u.dateRegistered) + '</td><td class="actions-cell">' + actionBtn + '</td></tr>';
+    }).join('');
+  };
+
+  const showUserDetails = async (uid) => {
+    try {
+      setLoading(true);
+      const res = await callAppsScript('getUserDetails', { targetUid: uid });
+      if (!res.success) throw new Error(res.error);
+      const user = res.user;
+      const entries = res.entries || [];
+      const weightEntries = res.weightEntries || [];
+      const body = $('#userDetailBody');
+      body.innerHTML =
+        '<div class="user-detail-section"><h4>User Information</h4><div class="user-detail-info">' +
+          '<div class="user-detail-item"><label>Name</label><p>' + escapeHtml(user.name) + '</p></div>' +
+          '<div class="user-detail-item"><label>Email</label><p>' + escapeHtml(user.email) + '</p></div>' +
+          '<div class="user-detail-item"><label>Phone</label><p>' + escapeHtml(user.phone || '—') + '</p></div>' +
+          '<div class="user-detail-item"><label>Account Type</label><p>' + escapeHtml(user.accountType || 'Operator') + '</p></div>' +
+          '<div class="user-detail-item"><label>Role</label><p>' + escapeHtml(user.role) + '</p></div>' +
+          '<div class="user-detail-item"><label>Status</label><p>' + escapeHtml(user.status) + '</p></div>' +
+        '</div></div>' +
+        '<div class="user-detail-section"><h4>Operator Entries (' + entries.length + ')</h4>' +
+          (entries.length ? '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Plate</th><th>Driver</th><th>Phone</th><th>Status</th><th>Date</th></tr></thead><tbody>' + entries.map(e => '<tr><td>' + escapeHtml(e.TruckPlate) + '</td><td>' + escapeHtml(e.DriverName) + '</td><td>' + escapeHtml(e.PhoneNumber) + '</td><td><span class="status-pill ' + statusClass(e.Status) + '">' + escapeHtml(e.Status) + '</span></td><td>' + formatDate(e.Timestamp) + '</td></tr>').join('') + '</tbody></table></div>' : '<p class="muted">No entries</p>') +
+        '</div>' +
+        '<div class="user-detail-section"><h4>Weight Entries (' + weightEntries.length + ')</h4>' +
+          (weightEntries.length ? '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Plate</th><th>Driver</th><th>Phone</th><th>Status</th><th>Date</th></tr></thead><tbody>' + weightEntries.map(e => '<tr><td>' + escapeHtml(e.TruckPlate) + '</td><td>' + escapeHtml(e.DriverName) + '</td><td>' + escapeHtml(e.PhoneNumber) + '</td><td><span class="status-pill ' + statusClass(e.Status) + '">' + escapeHtml(e.Status) + '</span></td><td>' + formatDate(e.Timestamp) + '</td></tr>').join('') + '</tbody></table></div>' : '<p class="muted">No weight entries</p>') +
+        '</div>';
+      $('#userDetailModal').hidden = false;
+    } catch (err) { toast('Failed: ' + err.message, 'error'); }
+    finally { setLoading(false); }
+  };
 
   const handleUserAction = async (uid, action) => {
     const newStatus = action === 'approveUser' ? 'Approved' : 'Disabled';
@@ -619,62 +792,272 @@
       await callAppsScript('updateUserStatus', { targetUid: uid, newStatus: newStatus });
       toast('User ' + (action === 'approveUser' ? 'approved' : 'disabled'), 'success');
       await loadUsers();
-    } catch (err) {
-      toast('Action failed: ' + err.message, 'error');
-    } finally {
-      setLoading(false);
-    }
+    } catch (err) { toast('Failed: ' + err.message, 'error'); }
+    finally { setLoading(false); }
+  };
+
+  const loadPendingEntries = async () => {
+    try {
+      const res = await callAppsScript('getWeightEntries', { statusFilter: 'Pending' });
+      let entries = (res && (res.data || res.entries)) || [];
+      entries.sort((a, b) => {
+        const timeA = new Date(a.PendingTime || a.Timestamp);
+        const timeB = new Date(b.PendingTime || b.Timestamp);
+        return timeA - timeB;
+      });
+      renderPendingEntries(entries);
+    } catch (err) { toast('Load failed: ' + err.message, 'error'); }
+  };
+
+  const renderPendingEntries = (entries) => {
+    const tbody = $('#pendingTbody');
+    if (!entries.length) { tbody.innerHTML = '<tr><td colspan="10" class="empty-state">No pending entries</td></tr>'; return; }
+    tbody.innerHTML = entries.map(e => {
+      const id = escapeHtml(e.EntryID);
+      const status = escapeHtml(e.Status);
+      return '<tr data-id="' + id + '">' +
+        '<td><input type="checkbox" class="pending-check" data-id="' + id + '" /></td>' +
+        '<td><strong>' + escapeHtml(e.TruckPlate) + '</strong></td>' +
+        '<td>' + escapeHtml(e.DriverName) + '</td>' +
+        '<td>' + escapeHtml(e.PhoneNumber) + '</td>' +
+        '<td>' + escapeHtml(e.OperatorName) + '</td>' +
+        '<td><span class="status-pill ' + statusClass(status) + '">' + status + '</span></td>' +
+        '<td>' + formatDate(e.PendingTime) + '</td>' +
+        '<td>' + formatDate(e.PaidTime) + '</td>' +
+        '<td>' + escapeHtml(e.BookingFee || '—') + '</td>' +
+        '<td class="actions-cell"><button class="btn btn-success btn-sm mark-paid-btn" data-id="' + id + '"><i class="fa-solid fa-money-bill"></i> Paid</button></td>' +
+      '</tr>';
+    }).join('');
+  };
+
+  const handleMarkPaid = async (entryId) => {
+    try {
+      setLoading(true);
+      await callAppsScript('updateWeightEntryStatus', { entryId: entryId, newStatus: 'Paid' });
+      toast('Marked as Paid', 'success');
+      await loadPendingEntries();
+    } catch (err) { toast('Failed: ' + err.message, 'error'); }
+    finally { setLoading(false); }
+  };
+
+  const handleApproveBulk = async () => {
+    if (pendingSelected.size === 0) { toast('Select entries first', 'warning'); return; }
+    try {
+      setLoading(true);
+      await callAppsScript('approveWeightEntries', { entryIds: [...pendingSelected] });
+      toast('Approved ' + pendingSelected.size + ' entries', 'success');
+      pendingSelected.clear();
+      await loadPendingEntries();
+      await loadApprovedList();
+    } catch (err) { toast('Failed: ' + err.message, 'error'); }
+    finally { setLoading(false); }
+  };
+
+  const loadApprovedList = async () => {
+    try {
+      const res = await callAppsScript('getApprovedList', {});
+      const entries = (res && (res.data || res.entries)) || [];
+      renderApprovedList(entries);
+    } catch (err) { toast('Load failed: ' + err.message, 'error'); }
+  };
+
+  const renderApprovedList = (entries) => {
+    const tbody = $('#approvedTbody');
+    if (!entries.length) { tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No approved entries</td></tr>'; return; }
+    tbody.innerHTML = entries.map(e => {
+      const id = escapeHtml(e.entryId);
+      return '<tr data-id="' + id + '">' +
+        '<td><input type="checkbox" class="approved-check" data-id="' + id + '" /></td>' +
+        '<td><strong>' + escapeHtml(e.truckPlate) + '</strong></td>' +
+        '<td>' + escapeHtml(e.driverName) + '</td>' +
+        '<td>' + escapeHtml(e.phoneNumber) + '</td>' +
+        '<td>' + escapeHtml(e.operatorName) + '</td>' +
+        '<td>' + formatDate(e.pendingTime) + '</td>' +
+        '<td>' + formatDate(e.approvedTime) + '</td>' +
+        '<td>' + (e.distributorNotified ? '<span class="status-pill active">Yes</span>' : '<span class="status-pill pending">No</span>') + '</td>' +
+      '</tr>';
+    }).join('');
+  };
+
+  const handleSendToDistributor = async () => {
+    if (approvedSelected.size === 0) { toast('Select entries first', 'warning'); return; }
+    try {
+      setLoading(true);
+      await callAppsScript('sendToDistributor', { entryIds: [...approvedSelected] });
+      toast('Sent to Distributor', 'success');
+      approvedSelected.clear();
+      await loadApprovedList();
+    } catch (err) { toast('Failed: ' + err.message, 'error'); }
+    finally { setLoading(false); }
+  };
+
+  const loadLoadingQueue = async () => {
+    try {
+      const res = await callAppsScript('getApprovedList', {});
+      const entries = (res && (res.data || res.entries)) || [];
+      const notified = entries.filter(e => e.distributorNotified);
+      const tbody = $('#loadingTbody');
+      if (!notified.length) { tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No entries in loading queue</td></tr>'; return; }
+      tbody.innerHTML = notified.map((e, idx) => {
+        const id = escapeHtml(e.entryId);
+        return '<tr>' +
+          '<td><strong>' + (idx + 1) + '</strong></td>' +
+          '<td><strong>' + escapeHtml(e.truckPlate) + '</strong></td>' +
+          '<td>' + escapeHtml(e.driverName) + '</td>' +
+          '<td>' + escapeHtml(e.phoneNumber) + '</td>' +
+          '<td>' + escapeHtml(e.operatorName) + '</td>' +
+          '<td>' + formatDate(e.pendingTime) + '</td>' +
+          '<td>' + formatDate(e.approvedTime) + '</td>' +
+          '<td>—</td>' +
+          '<td class="actions-cell"><button class="btn btn-warning btn-sm set-loading-btn" data-id="' + id + '"><i class="fa-solid fa-truck-loading"></i> Set Loading</button></td>' +
+        '</tr>';
+      }).join('');
+    } catch (err) { toast('Load failed: ' + err.message, 'error'); }
+  };
+
+  const loadTransitList = async () => {
+    try {
+      const res = await callAppsScript('getWeightEntries', { statusFilter: 'Transit' });
+      const entries = (res && (res.data || res.entries)) || [];
+      const tbody = $('#transitTbody');
+      if (!entries.length) { tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No entries in transit</td></tr>'; return; }
+      tbody.innerHTML = entries.map(e => {
+        const id = escapeHtml(e.EntryID);
+        return '<tr>' +
+          '<td><strong>' + escapeHtml(e.TruckPlate) + '</strong></td>' +
+          '<td>' + escapeHtml(e.DriverName) + '</td>' +
+          '<td>' + escapeHtml(e.PhoneNumber) + '</td>' +
+          '<td>' + escapeHtml(e.OperatorName) + '</td>' +
+          '<td>' + formatDate(e.PendingTime) + '</td>' +
+          '<td>' + formatDate(e.ApprovedTime) + '</td>' +
+          '<td>' + formatDate(e.LoadingTime) + '</td>' +
+          '<td>' + formatDate(e.TransitTime) + '</td>' +
+          '<td class="actions-cell"><button class="btn btn-success btn-sm set-delivered-btn" data-id="' + id + '"><i class="fa-solid fa-flag-checkered"></i> Delivered</button></td>' +
+        '</tr>';
+      }).join('');
+    } catch (err) { toast('Load failed: ' + err.message, 'error'); }
+  };
+
+  const loadDeliveredList = async () => {
+    try {
+      const res = await callAppsScript('getWeightEntries', { statusFilter: 'Delivered' });
+      const entries = (res && (res.data || res.entries)) || [];
+      const tbody = $('#deliveredTbody');
+      if (!entries.length) { tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No delivered entries</td></tr>'; return; }
+      tbody.innerHTML = entries.map(e => {
+        return '<tr>' +
+          '<td><strong>' + escapeHtml(e.TruckPlate) + '</strong></td>' +
+          '<td>' + escapeHtml(e.DriverName) + '</td>' +
+          '<td>' + escapeHtml(e.PhoneNumber) + '</td>' +
+          '<td>' + escapeHtml(e.OperatorName) + '</td>' +
+          '<td>' + formatDate(e.PendingTime) + '</td>' +
+          '<td>' + formatDate(e.ApprovedTime) + '</td>' +
+          '<td>' + formatDate(e.LoadingTime) + '</td>' +
+          '<td>' + formatDate(e.TransitTime) + '</td>' +
+          '<td>' + formatDate(e.DeliveredTime) + '</td>' +
+        '</tr>';
+      }).join('');
+    } catch (err) { toast('Load failed: ' + err.message, 'error'); }
   };
 
   const loadGlobalEntries = async () => {
     try {
-      const res = await callAppsScript('getGlobalEntries', {});
+      const dateFilter = $('#adminDateFilter') ? $('#adminDateFilter').value : 'today';
+      const finalFilter = dateFilter === 'custom' ? ($('#adminCustomDate').value || 'today') : dateFilter;
+      const res = await callAppsScript('getEntries', { dateFilter: finalFilter });
       const entries = (res && (res.data || res.entries)) || [];
       renderGlobalEntries(entries);
-    } catch (err) {
-      console.error('Load global entries error:', err);
-      throw err;
-    }
+    } catch (err) { toast('Load failed: ' + err.message, 'error'); }
   };
 
   const renderGlobalEntries = (entries) => {
-  const tbody = $('#globalTbody');
-  if (!entries.length) {
-    tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No entries found</td></tr>';
-    return;
-  }
-  tbody.innerHTML = entries.map(e => {
-    const trucking = escapeHtml(e.truckingNo || e.TruckingNo || e.TruckPlate || '—');
-    const driver = escapeHtml(e.driverName || e.DriverName || '—');
-    const phone = escapeHtml(e.phoneNumber || e.PhoneNumber || '—');
-    const operator = escapeHtml(e.operator || e.OperatorName || '—');
-    const status = escapeHtml(e.status || e.Status || e.MessageStatus || 'Pending');
-    const date = formatDate(e.date || e.Timestamp || e.createdAt);
-    return '<tr>' +
-      '<td><strong>' + trucking + '</strong></td>' +
-      '<td>' + driver + '</td>' +
-      '<td>' + phone + '</td>' +
-      '<td>' + operator + '</td>' +
-      '<td><span class="status-pill ' + statusClass(status) + '">' + status + '</span></td>' +
-      '<td>' + date + '</td>' +
-    '</tr>';
-  }).join('');
-};
+    const tbody = $('#globalTbody');
+    if (!entries.length) { tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No entries</td></tr>'; return; }
+    tbody.innerHTML = entries.map(e => {
+      const phoneLink = e.PhoneNumber ? '<a href="tel:' + escapeHtml(e.PhoneNumber) + '" class="phone-link"><i class="fa-solid fa-phone"></i></a>' : '';
+      return '<tr><td><strong>' + escapeHtml(e.TruckPlate || '—') + '</strong></td><td>' + escapeHtml(e.DriverName || '—') + '</td><td>' + escapeHtml(e.PhoneNumber || '—') + ' ' + phoneLink + '</td><td>' + escapeHtml(e.Address || '—') + '</td><td>' + escapeHtml(e.OperatorName || '—') + '</td><td><span class="status-pill ' + statusClass(e.Status) + '">' + escapeHtml(e.Status || 'Pending') + '</span></td><td>' + formatDate(e.PendingTime || e.Timestamp) + '</td><td>' + formatDate(e.TransitTime) + '</td><td>' + formatDate(e.DeliveredTime) + '</td></tr>';
+    }).join('');
+  };
 
+  const loadActivities = async () => {
+    try {
+      const res = await callAppsScript('getUserActivities', {});
+      const activities = (res && (res.data || res.activities)) || [];
+      const tbody = $('#activitiesTbody');
+      if (!activities.length) { tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No activities</td></tr>'; return; }
+      tbody.innerHTML = activities.map(a => '<tr><td>' + formatDate(a.timestamp) + '</td><td>' + escapeHtml(a.userName || a.userId || '—') + '</td><td><span class="badge">' + escapeHtml(a.action) + '</span></td><td>' + escapeHtml(a.details || '') + '</td></tr>').join('');
+    } catch (err) { toast('Load failed: ' + err.message, 'error'); }
+  };
+
+  // ============ BLACKLIST ============
+  const loadBlacklist = async () => {
+    try {
+      const res = await callAppsScript('getBlacklist', {});
+      const list = (res && (res.data || res.blacklist)) || [];
+      renderBlacklist(list);
+    } catch (err) { toast('Load failed: ' + err.message, 'error'); }
+  };
+
+  const renderBlacklist = (list) => {
+    const tbody = $('#blacklistTbody');
+    if (!list.length) { tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No blacklisted plates</td></tr>'; return; }
+    tbody.innerHTML = list.map(item => {
+      return '<tr><td><strong>' + escapeHtml(item.plate) + '</strong></td><td>' + escapeHtml(item.reason) + '</td><td>' + formatDateShort(item.dateAdded) + '</td><td><button class="btn btn-danger btn-sm remove-bl-btn" data-plate="' + escapeHtml(item.plate) + '"><i class="fa-solid fa-trash"></i> Remove</button></td></tr>';
+    }).join('');
+  };
+
+  const addToBlacklist = async () => {
+    const plate = $('#blPlate').value.trim();
+    const reason = $('#blReason').value.trim();
+    if (!plate || !reason) { toast('Fill all fields', 'warning'); return; }
+    try {
+      setLoading(true);
+      await callAppsScript('addToBlacklist', { plate: plate, reason: reason });
+      toast('Added to blacklist', 'success');
+      $('#blPlate').value = '';
+      $('#blReason').value = '';
+      await loadBlacklist();
+    } catch (err) { toast('Failed: ' + err.message, 'error'); }
+    finally { setLoading(false); }
+  };
+
+  const removeFromBlacklist = async (plate) => {
+    if (!confirm('Remove ' + plate + ' from blacklist?')) return;
+    try {
+      setLoading(true);
+      await callAppsScript('removeFromBlacklist', { plate: plate });
+      toast('Removed', 'success');
+      await loadBlacklist();
+    } catch (err) { toast('Failed: ' + err.message, 'error'); }
+    finally { setLoading(false); }
+  };
+
+  // ============ PRINT ============
+  const handlePrint = () => { window.print(); };
+
+  // ============ EVENT BINDINGS ============
   const bindEvents = () => {
     $$('.tab-btn').forEach(btn => btn.addEventListener('click', () => switchTab(btn.dataset.tab)));
     $('#loginForm').addEventListener('submit', handleLogin);
     $('#registerForm').addEventListener('submit', handleRegister);
     $('#logoutBtnDash').addEventListener('click', handleLogout);
     $('#logoutBtnAdmin').addEventListener('click', handleLogout);
+    $('#logoutBtnWeight').addEventListener('click', handleLogout);
+    $('#logoutBtnDist').addEventListener('click', handleLogout);
 
-    $$('#dashboardScreen .nav-item').forEach(n => {
-      n.addEventListener('click', (e) => {
-        e.preventDefault();
-        switchDashView(n.dataset.view);
-      });
+    // Toggle Shop Name field based on Account Type selection
+    $('#regAccountType').addEventListener('change', (e) => {
+      const shopGroup = $('#shopNameGroup');
+      if (e.target.value === 'Weightman') {
+        shopGroup.style.display = 'block';
+        $('#regShopName').setAttribute('required', 'required');
+      } else {
+        shopGroup.style.display = 'none';
+        $('#regShopName').removeAttribute('required');
+      }
     });
 
+    $$('#dashboardScreen .nav-item').forEach(n => n.addEventListener('click', (e) => { e.preventDefault(); switchDashView(n.dataset.view); }));
     $('#openAddFormBtn').addEventListener('click', () => switchDashView('add'));
     $('#cancelAddBtn').addEventListener('click', () => switchDashView('entries'));
     $('#addEntryForm').addEventListener('submit', handleAddEntry);
@@ -699,41 +1082,135 @@
         updateBulkBtn();
       }
     });
+
     $('#entriesTbody').addEventListener('click', (e) => {
-      const btn = e.target.closest('.delete-btn');
-      if (btn) handleDeleteEntry(btn.dataset.id);
+      const deleteBtn = e.target.closest('.delete-btn');
+      if (deleteBtn) handleDeleteEntry(deleteBtn.dataset.id);
+      const statusBtn = e.target.closest('.status-btn');
+      if (statusBtn) handleUpdateStatus(statusBtn.dataset.id, statusBtn.dataset.status);
     });
 
-    $$('#adminScreen .nav-item').forEach(n => {
-      n.addEventListener('click', (e) => {
-        e.preventDefault();
-        switchAdminView(n.dataset.view);
-      });
+    $$('#weightmanScreen .nav-item').forEach(n => n.addEventListener('click', (e) => { e.preventDefault(); switchWeightView(n.dataset.view); }));
+    $('#openAddWeightBtn').addEventListener('click', () => switchWeightView('addWeight'));
+    $('#cancelWeightBtn').addEventListener('click', () => switchWeightView('weightEntries'));
+    $('#addWeightForm').addEventListener('submit', handleAddWeightEntry);
+
+    $$('#distributorScreen .nav-item').forEach(n => n.addEventListener('click', (e) => { e.preventDefault(); switchDistView(n.dataset.view); }));
+    $('#sendBulkSmsBtn').addEventListener('click', sendBulkDistSms);
+    $('#distListTbody').addEventListener('change', (e) => {
+      if (e.target.classList.contains('dist-check')) {
+        const id = e.target.dataset.id;
+        if (e.target.checked) distSelected.add(id); else distSelected.delete(id);
+        $('#sendBulkSmsBtn').disabled = distSelected.size === 0;
+      }
+    });
+    $('#distListTbody').addEventListener('click', (e) => {
+      const smsBtn = e.target.closest('.send-sms-btn');
+      if (smsBtn) sendDistSms(smsBtn.dataset.id, smsBtn.dataset.phone);
     });
 
+    $$('#adminScreen .nav-item').forEach(n => n.addEventListener('click', (e) => { e.preventDefault(); switchAdminView(n.dataset.view); }));
     $('#usersTbody').addEventListener('click', (e) => {
       const approve = e.target.closest('.approve-btn');
       const disable = e.target.closest('.disable-btn');
+      const userLink = e.target.closest('.user-name-link');
       if (approve) handleUserAction(approve.dataset.id, 'approveUser');
-      if (disable) {
-        if (confirm('Disable this user? They will be unable to sign in.')) {
-          handleUserAction(disable.dataset.id, 'disableUser');
-        }
+      if (disable && confirm('Disable this user?')) handleUserAction(disable.dataset.id, 'disableUser');
+      if (userLink) { e.preventDefault(); showUserDetails(userLink.dataset.uid); }
+    });
+
+    $('#pendingTbody').addEventListener('change', (e) => {
+      if (e.target.classList.contains('pending-check')) {
+        const id = e.target.dataset.id;
+        if (e.target.checked) pendingSelected.add(id); else pendingSelected.delete(id);
+        $('#approveBulkBtn').disabled = pendingSelected.size === 0;
+      }
+    });
+    $('#pendingTbody').addEventListener('click', (e) => {
+      const paidBtn = e.target.closest('.mark-paid-btn');
+      if (paidBtn) handleMarkPaid(paidBtn.dataset.id);
+    });
+    $('#approveBulkBtn').addEventListener('click', handleApproveBulk);
+
+    $('#approvedTbody').addEventListener('change', (e) => {
+      if (e.target.classList.contains('approved-check')) {
+        const id = e.target.dataset.id;
+        if (e.target.checked) approvedSelected.add(id); else approvedSelected.delete(id);
+        $('#sendToDistBtn').disabled = approvedSelected.size === 0;
+      }
+    });
+    $('#sendToDistBtn').addEventListener('click', handleSendToDistributor);
+
+    $('#loadingTbody').addEventListener('click', async (e) => {
+      const btn = e.target.closest('.set-loading-btn');
+      if (btn) {
+        try {
+          setLoading(true);
+          await callAppsScript('updateWeightEntryStatus', { entryId: btn.dataset.id, newStatus: 'Loading' });
+          toast('Set to Loading', 'success');
+          await loadLoadingQueue();
+        } catch (err) { toast('Failed: ' + err.message, 'error'); }
+        finally { setLoading(false); }
       }
     });
 
-    $('#menuToggle').addEventListener('click', () => {
-      $('#dashboardScreen .sidebar').classList.toggle('open');
+    $('#transitTbody').addEventListener('click', async (e) => {
+      const btn = e.target.closest('.set-delivered-btn');
+      if (btn) {
+        try {
+          setLoading(true);
+          await callAppsScript('updateWeightEntryStatus', { entryId: btn.dataset.id, newStatus: 'Delivered' });
+          toast('Set to Delivered', 'success');
+          await loadTransitList();
+          await loadDeliveredList();
+        } catch (err) { toast('Failed: ' + err.message, 'error'); }
+        finally { setLoading(false); }
+      }
     });
-    $('#menuToggleAdmin').addEventListener('click', () => {
-      $('#adminScreen .sidebar').classList.toggle('open');
-    });
+
+    $('#menuToggle').addEventListener('click', () => $('#dashboardScreen .sidebar').classList.toggle('open'));
+    $('#menuToggleAdmin').addEventListener('click', () => $('#adminScreen .sidebar').classList.toggle('open'));
+    $('#menuToggleWeight').addEventListener('click', () => $('#weightmanScreen .sidebar').classList.toggle('open'));
+    $('#menuToggleDist').addEventListener('click', () => $('#distributorScreen .sidebar').classList.toggle('open'));
 
     document.addEventListener('click', (e) => {
       if (window.innerWidth > 900) return;
       if (e.target.closest('.sidebar') || e.target.closest('.menu-toggle')) return;
       $$('.sidebar').forEach(s => s.classList.remove('open'));
     });
+
+    $('#dateFilter').addEventListener('change', (e) => {
+      $('#customDate').style.display = e.target.value === 'custom' ? 'block' : 'none';
+      loadOperatorData();
+    });
+    $('#customDate').addEventListener('change', loadOperatorData);
+    $('#adminDateFilter').addEventListener('change', (e) => {
+      $('#adminCustomDate').style.display = e.target.value === 'custom' ? 'block' : 'none';
+      loadGlobalEntries();
+    });
+    $('#adminCustomDate').addEventListener('change', loadGlobalEntries);
+
+    $('#searchInput').addEventListener('input', async (e) => {
+      const query = e.target.value.trim();
+      if (query.length < 2) { await loadOperatorData(); return; }
+      try {
+        const res = await callAppsScript('searchEntries', { query: query });
+        const entries = (res && (res.data || res.entries)) || [];
+        renderEntries(entries);
+        renderStats(entries);
+      } catch (err) { console.error(err); }
+    });
+
+    $('#printBtn').addEventListener('click', handlePrint);
+    $('#adminPrintBtn').addEventListener('click', handlePrint);
+
+    $('#addToBlacklistBtn').addEventListener('click', addToBlacklist);
+    $('#blacklistTbody').addEventListener('click', (e) => {
+      const btn = e.target.closest('.remove-bl-btn');
+      if (btn) removeFromBlacklist(btn.dataset.plate);
+    });
+    $('#closeBlModal').addEventListener('click', () => { $('#blacklistModal').hidden = true; });
+    $('#closeUserModal').addEventListener('click', () => { $('#userDetailModal').hidden = true; });
   };
 
   const init = () => {
