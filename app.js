@@ -269,15 +269,15 @@
       // Get ID token – we will pass it in the payload
       const idToken = await cred.user.getIdToken();
       
-      // Register in backend – send token and user data (uid will be derived from token)
+      // Register in backend – send token + uid explicitly
       const res = await callAppsScript('register', {
         email: email,
         name: name,
         phone: phone,
         accountType: accountType,
         shopName: shopName,
-        token: idToken,   // token will be used by backend to verify and get uid
-        uid: cred.user.uid    // explicit uid fallback in case token lookup is slow
+        token: idToken,
+        uid: cred.user.uid   // explicit uid fallback
       });
       
       toast('Account created! Awaiting admin approval.', 'success');
@@ -317,6 +317,24 @@
       $('#dashUserRole').textContent = accountType || 'Operator';
       showScreen('dashboard');
       loadOperatorData();
+    }
+  };
+
+  // ===== notifyBackendAuth: calls checkStatus after Firebase login =====
+  const notifyBackendAuth = async (user, action) => {
+    try {
+      setLoading(true);
+      const token = await user.getIdToken(true);
+      const res = await callAppsScript(action || 'checkStatus', {
+        token: token,
+        uid: user.uid
+      });
+      routeByRole(res);
+    } catch (err) {
+      toast('Login failed: ' + err.message, 'error');
+      await auth.signOut();
+    } finally {
+      setLoading(false);
     }
   };
 
