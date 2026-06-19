@@ -5,9 +5,92 @@
 (() => {
   'use strict';
 
+  // Inject date-group header styling (kept here so no separate CSS file edit is needed)
+  const __dateHeaderStyle = document.createElement('style');
+  __dateHeaderStyle.textContent = `
+    tr.date-group-header td {
+      background: #eef2ff;
+      color: #1e3a8a;
+      font-weight: 700;
+      font-size: 13px;
+      padding: 10px 16px;
+      border-top: 2px solid #c7d2fe;
+      border-bottom: 1px solid #c7d2fe;
+      letter-spacing: 0.3px;
+    }
+    .form-group { position: relative; }
+    .suggestions {
+      display: none;
+      position: absolute;
+      top: 100%;
+      left: 0;
+      right: 0;
+      z-index: 50;
+      background: #fff;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      margin-top: 4px;
+      max-height: 220px;
+      overflow-y: auto;
+      box-shadow: 0 8px 20px rgba(0,0,0,0.12);
+    }
+    .suggestion-item {
+      padding: 10px 14px;
+      cursor: pointer;
+      font-size: 14px;
+      border-bottom: 1px solid #f1f5f9;
+    }
+    .suggestion-item:last-child { border-bottom: none; }
+    .suggestion-item:hover { background: #eef2ff; }
+    .suggestion-item strong { color: #1e3a8a; }
+    .suggestion-item span { color: #6b7280; font-size: 13px; }
+
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(15, 23, 42, 0.55);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .modal-box {
+      background: #fff;
+      border-radius: 12px;
+      max-height: 90vh;
+      overflow-y: auto;
+      box-shadow: 0 20px 50px rgba(0,0,0,0.25);
+    }
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 20px;
+      border-bottom: 1px solid #e5e7eb;
+    }
+    .modal-header h3 { margin: 0; font-size: 17px; }
+    .modal-close {
+      background: none;
+      border: none;
+      font-size: 24px;
+      line-height: 1;
+      cursor: pointer;
+      color: #6b7280;
+      padding: 0 4px;
+    }
+    .modal-close:hover { color: #1e3a8a; }
+    .modal-body { padding: 18px 20px; }
+    .btn-secondary {
+      background: #fff;
+      border: 1px solid #c7d2fe;
+      color: #1e3a8a;
+    }
+    .btn-secondary:hover { background: #eef2ff; }
+  `;
+  document.head.appendChild(__dateHeaderStyle);
+
   const CONFIG = {
     appsScriptUrl: 'https://script.google.com/macros/s/AKfycbx0X3CqjInmOTYYdMakAQAp9ZbTopPYw_HuT5oZPO_oGeoo64s0lOymN4nrNcmHQBzp/exec',
-    adminKey: 'TMS_ADMIN_HARDCODED',
     firebase: {
       apiKey: 'AIzaSyDKRgkhRq1Rae9Zacx-6xGUt1VLyUAIbzg',
       authDomain: 'rizwan-nomi.firebaseapp.com',
@@ -256,7 +339,6 @@
     const password = $('#regPassword').value;
     const accountType = $('#regAccountType').value;
     const shopName = $('#regShopName').value.trim();
-    
     const btn = $('button[type="submit"]', form);
     btn.disabled = true;
 
@@ -417,13 +499,46 @@
     $('#statPending').textContent = entries.filter(e => /pending/i.test(e.Status)).length;
   };
 
+  const groupHeadingDate = (d) => {
+    if (!d) return 'Unknown Date';
+    try {
+      const date = new Date(d);
+      const today = new Date();
+      const yesterday = new Date();
+      yesterday.setDate(today.getDate() - 1);
+      const sameDay = (a, b) => a.toDateString() === b.toDateString();
+      if (sameDay(date, today)) return 'Today — ' + date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+      if (sameDay(date, yesterday)) return 'Yesterday — ' + date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+      return date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+    } catch (e) { return 'Unknown Date'; }
+  };
+
   const renderEntries = (entries) => {
     const tbody = $('#entriesTbody');
     if (!entries.length) {
       tbody.innerHTML = '<tr><td colspan="10" class="empty-state"><i class="fa-solid fa-inbox"></i> No entries yet</td></tr>';
       return;
     }
-    tbody.innerHTML = entries.map(e => {
+
+    // Sort newest first by booking/created timestamp
+    const sorted = [...entries].sort((a, b) => {
+      const da = new Date(a.PendingTime || a.Timestamp || 0).getTime();
+      const db = new Date(b.PendingTime || b.Timestamp || 0).getTime();
+      return db - da;
+    });
+
+    let html = '';
+    let lastDateKey = null;
+
+    sorted.forEach(e => {
+      const rawDate = e.PendingTime || e.Timestamp;
+      const dateKey = rawDate ? new Date(rawDate).toDateString() : 'unknown';
+
+      if (dateKey !== lastDateKey) {
+        lastDateKey = dateKey;
+        html += '<tr class="date-group-header"><td colspan="10">' + groupHeadingDate(rawDate) + '</td></tr>';
+      }
+
       const id = escapeHtml(e.EntryID || '');
       const plate = escapeHtml(e.TruckPlate || '—');
       const driver = escapeHtml(e.DriverName || '—');
@@ -436,7 +551,7 @@
       const phoneLink = e.PhoneNumber ? '<a href="tel:' + escapeHtml(e.PhoneNumber) + '" class="phone-link" title="Call"><i class="fa-solid fa-phone"></i></a>' : '';
       const smsLink = e.PhoneNumber ? '<a href="sms:' + escapeHtml(e.PhoneNumber) + '" class="btn-icon phone" title="SMS"><i class="fa-solid fa-message"></i></a>' : '';
 
-      return '<tr data-id="' + id + '">' +
+      html += '<tr data-id="' + id + '">' +
         '<td><input type="checkbox" class="row-check" data-id="' + id + '" /></td>' +
         '<td><strong>' + plate + '</strong></td>' +
         '<td>' + driver + '</td>' +
@@ -452,7 +567,9 @@
         '<td>' + delivered + '</td>' +
         '<td class="actions-cell"><button class="btn-icon danger delete-btn" data-id="' + id + '" title="Delete"><i class="fa-solid fa-trash"></i></button></td>' +
       '</tr>';
-    }).join('');
+    });
+
+    tbody.innerHTML = html;
   };
 
   const updateBulkBtn = () => {
@@ -504,6 +621,18 @@
     finally { setLoading(false); }
   };
 
+  // ===== buildBookingSmsMessage: builds the standard booking SMS in correct order =====
+  const buildBookingSmsMessage = (phoneNumber, bookingFee) => {
+    const feeText = bookingFee ? ' بکنگ فیس: ' + bookingFee + '۔' : '';
+    let msg = 'آپ کی بلٹی بک ہو گئی ہے۔' + feeText + ' ہماری ٹرانسپورٹ سروس استعمال کرنے کا شکریہ۔';
+    if (phoneNumber) {
+      msg += '\n' + phoneNumber;
+    }
+    msg += '\nرضوان جٹ ٹرانسپورٹ گروپ 03446731002';
+    msg += '\nنوید 03481496487';
+    return msg;
+  };
+
   // ===== sendSmsToDriver: opens SMS app with pre-filled message =====
   const sendSmsToDriver = (phone, message) => {
     if (!phone) return;
@@ -528,6 +657,267 @@
     }
   };
 
+  // ===== Truck plate autocomplete: suggest past drivers for repeat loadings =====
+  const setupPlateAutocomplete = () => {
+    const plateInput = $('#truckPlate');
+    const suggestBox = $('#plateSuggestions');
+    if (!plateInput || !suggestBox) return;
+
+    const hideSuggestions = () => {
+      suggestBox.innerHTML = '';
+      suggestBox.style.display = 'none';
+    };
+
+    const showSuggestions = (matches) => {
+      if (!matches.length) { hideSuggestions(); return; }
+      suggestBox.innerHTML = matches.map(m =>
+        '<div class="suggestion-item" data-plate="' + escapeHtml(m.TruckPlate) + '" ' +
+        'data-driver="' + escapeHtml(m.DriverName || '') + '" ' +
+        'data-phone="' + escapeHtml(m.PhoneNumber || '') + '" ' +
+        'data-address="' + escapeHtml(m.Address || '') + '">' +
+          '<strong>' + escapeHtml(m.TruckPlate) + '</strong>' +
+          '<span> — ' + escapeHtml(m.DriverName || 'Unknown driver') + (m.PhoneNumber ? ' · ' + escapeHtml(m.PhoneNumber) : '') + '</span>' +
+        '</div>'
+      ).join('');
+      suggestBox.style.display = 'block';
+    };
+
+    plateInput.addEventListener('input', () => {
+      const query = plateInput.value.trim().toLowerCase();
+      if (query.length < 2) { hideSuggestions(); return; }
+
+      // Find matching plates, most recent first, deduplicated by plate
+      const seen = new Set();
+      const matches = [];
+      const sorted = [...allEntriesCache].sort((a, b) => {
+        const da = new Date(a.PendingTime || a.Timestamp || 0).getTime();
+        const db = new Date(b.PendingTime || b.Timestamp || 0).getTime();
+        return db - da;
+      });
+      for (const entry of sorted) {
+        const plate = String(entry.TruckPlate || '');
+        const plateLower = plate.toLowerCase();
+        if (plateLower.includes(query) && !seen.has(plateLower)) {
+          seen.add(plateLower);
+          matches.push(entry);
+          if (matches.length >= 6) break;
+        }
+      }
+      showSuggestions(matches);
+    });
+
+    suggestBox.addEventListener('click', (e) => {
+      const item = e.target.closest('.suggestion-item');
+      if (!item) return;
+      $('#truckPlate').value = item.dataset.plate || '';
+      $('#driverName').value = item.dataset.driver || '';
+      $('#phoneNumber').value = item.dataset.phone || '';
+      $('#address').value = item.dataset.address || '';
+      // Booking fee and SMS checkbox stay fresh for the new entry; date/time will be set automatically on save
+      hideSuggestions();
+      $('#driverName').focus();
+    });
+
+    document.addEventListener('click', (e) => {
+      if (!suggestBox.contains(e.target) && e.target !== plateInput) hideSuggestions();
+    });
+
+    plateInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') hideSuggestions();
+    });
+  };
+
+  // ===================== ADD OLD (BACKDATED) ENTRIES =====================
+  let backdatedBatch = []; // { truckPlate, driverName, phoneNumber, address, bookingFee, status }
+
+  const injectBackdatedUI = () => {
+    // Add the "Add Old Entries" button next to "Add Entry" if not already present
+    const addBtn = $('#openAddFormBtn');
+    if (addBtn && !$('#openBackdatedBtn')) {
+      const oldBtn = document.createElement('button');
+      oldBtn.id = 'openBackdatedBtn';
+      oldBtn.className = 'btn btn-secondary btn-sm';
+      oldBtn.innerHTML = '<i class="fa-solid fa-clock-rotate-left"></i> Add Old Entries';
+      oldBtn.style.marginRight = '8px';
+      addBtn.parentNode.insertBefore(oldBtn, addBtn);
+      oldBtn.addEventListener('click', openBackdatedModal);
+    }
+
+    // Inject modal markup once
+    if ($('#backdatedModal')) return;
+    const modal = document.createElement('div');
+    modal.id = 'backdatedModal';
+    modal.className = 'modal-overlay';
+    modal.style.display = 'none';
+    modal.innerHTML = `
+      <div class="modal-box" style="max-width:720px;width:95%;">
+        <div class="modal-header">
+          <h3><i class="fa-solid fa-clock-rotate-left"></i> Add Old Entries</h3>
+          <button class="modal-close" id="closeBackdatedModal">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p class="muted" style="margin-bottom:14px;">Set the date/time once, then add as many trucks as you have for that date. Each will be saved with this date.</p>
+          <div class="form-group">
+            <label for="bdDateTime">Entry Date &amp; Time *</label>
+            <input type="datetime-local" id="bdDateTime" />
+          </div>
+          <div class="grid-2" style="margin-top:10px;">
+            <div class="form-group"><label for="bdPlate">Truck Number Plate *</label><input type="text" id="bdPlate" placeholder="ABC-1234" autocomplete="off" /></div>
+            <div class="form-group"><label for="bdDriver">Driver Name *</label><input type="text" id="bdDriver" placeholder="Driver full name" /></div>
+            <div class="form-group"><label for="bdPhone">Phone Number *</label><input type="tel" id="bdPhone" placeholder="+923001234567" /></div>
+            <div class="form-group"><label for="bdAddress">Address (Optional)</label><input type="text" id="bdAddress" placeholder="Pickup/Drop location" /></div>
+            <div class="form-group"><label for="bdFee">Booking Fee (Optional)</label><input type="text" id="bdFee" placeholder="e.g. 500" /></div>
+            <div class="form-group">
+              <label for="bdStatus">Status *</label>
+              <select id="bdStatus">
+                <option value="Pending">Pending</option>
+                <option value="Transit">Transit</option>
+                <option value="Delivered">Delivered</option>
+              </select>
+            </div>
+          </div>
+          <button type="button" class="btn btn-primary btn-sm" id="addToBatchBtn" style="margin-top:6px;"><i class="fa-solid fa-plus"></i> Add to List</button>
+
+          <div style="margin-top:18px;">
+            <h4 style="margin-bottom:8px;">Entries to save (<span id="batchCount">0</span>)</h4>
+            <div class="table-wrapper" style="max-height:240px;overflow-y:auto;">
+              <table class="data-table">
+                <thead><tr><th>Plate</th><th>Driver</th><th>Phone</th><th>Status</th><th>Fee</th><th></th></tr></thead>
+                <tbody id="batchTbody"><tr><td colspan="6" class="empty-state">No entries added yet</td></tr></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <div class="form-actions" style="padding:14px 20px;">
+          <button type="button" class="btn btn-ghost" id="cancelBackdatedBtn">Cancel</button>
+          <button type="button" class="btn btn-primary" id="saveBackdatedBtn"><i class="fa-solid fa-save"></i> Save All to Sheet</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+
+    $('#closeBackdatedModal').addEventListener('click', closeBackdatedModal);
+    $('#cancelBackdatedBtn').addEventListener('click', closeBackdatedModal);
+    $('#addToBatchBtn').addEventListener('click', addToBackdatedBatch);
+    $('#saveBackdatedBtn').addEventListener('click', saveBackdatedBatch);
+    $('#batchTbody').addEventListener('click', (e) => {
+      const btn = e.target.closest('.remove-batch-item');
+      if (btn) {
+        const idx = parseInt(btn.dataset.idx, 10);
+        backdatedBatch.splice(idx, 1);
+        renderBackdatedBatch();
+      }
+    });
+  };
+
+  const openBackdatedModal = () => {
+    injectBackdatedUI();
+    backdatedBatch = [];
+    renderBackdatedBatch();
+    // Default date/time to now, in local datetime-local format
+    const now = new Date();
+    now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+    $('#bdDateTime').value = now.toISOString().slice(0, 16);
+    $('#bdPlate').value = '';
+    $('#bdDriver').value = '';
+    $('#bdPhone').value = '';
+    $('#bdAddress').value = '';
+    $('#bdFee').value = '';
+    $('#bdStatus').value = 'Pending';
+    $('#backdatedModal').style.display = 'flex';
+  };
+
+  const closeBackdatedModal = () => {
+    $('#backdatedModal').style.display = 'none';
+  };
+
+  const addToBackdatedBatch = () => {
+    const plate = $('#bdPlate').value.trim();
+    const driver = $('#bdDriver').value.trim();
+    const phone = $('#bdPhone').value.trim();
+    if (!plate || !driver || !phone) {
+      toast('Plate, driver name and phone are required', 'warning');
+      return;
+    }
+    backdatedBatch.push({
+      truckPlate: plate,
+      driverName: driver,
+      phoneNumber: phone,
+      address: $('#bdAddress').value.trim(),
+      bookingFee: $('#bdFee').value.trim(),
+      status: $('#bdStatus').value
+    });
+    renderBackdatedBatch();
+    // Clear fields for next entry, keep date/status as-is for speed
+    $('#bdPlate').value = '';
+    $('#bdDriver').value = '';
+    $('#bdPhone').value = '';
+    $('#bdAddress').value = '';
+    $('#bdFee').value = '';
+    $('#bdPlate').focus();
+  };
+
+  const renderBackdatedBatch = () => {
+    $('#batchCount').textContent = backdatedBatch.length;
+    const tbody = $('#batchTbody');
+    if (!backdatedBatch.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No entries added yet</td></tr>';
+      return;
+    }
+    tbody.innerHTML = backdatedBatch.map((b, idx) =>
+      '<tr>' +
+        '<td><strong>' + escapeHtml(b.truckPlate) + '</strong></td>' +
+        '<td>' + escapeHtml(b.driverName) + '</td>' +
+        '<td>' + escapeHtml(b.phoneNumber) + '</td>' +
+        '<td>' + escapeHtml(b.status) + '</td>' +
+        '<td>' + escapeHtml(b.bookingFee || '—') + '</td>' +
+        '<td><button type="button" class="btn-icon danger remove-batch-item" data-idx="' + idx + '" title="Remove"><i class="fa-solid fa-trash"></i></button></td>' +
+      '</tr>'
+    ).join('');
+  };
+
+  const saveBackdatedBatch = async () => {
+    const dateTimeVal = $('#bdDateTime').value;
+    if (!dateTimeVal) { toast('Please set the date and time', 'warning'); return; }
+    if (!backdatedBatch.length) { toast('Add at least one entry to the list', 'warning'); return; }
+
+    try {
+      setLoading(true);
+      let successCount = 0;
+      let failCount = 0;
+      const failedPlates = [];
+
+      for (const entry of backdatedBatch) {
+        try {
+          await callAppsScript('addBackdatedEntry', {
+            truckPlate: entry.truckPlate,
+            driverName: entry.driverName,
+            phoneNumber: entry.phoneNumber,
+            address: entry.address,
+            bookingFee: entry.bookingFee,
+            status: entry.status,
+            entryDateTime: new Date(dateTimeVal).toISOString()
+          });
+          successCount++;
+        } catch (err) {
+          failCount++;
+          failedPlates.push(entry.truckPlate);
+        }
+      }
+
+      if (successCount > 0) toast(successCount + ' old entries saved successfully', 'success');
+      if (failCount > 0) toast(failCount + ' failed: ' + failedPlates.join(', '), 'error');
+
+      backdatedBatch = [];
+      closeBackdatedModal();
+      await loadOperatorData();
+    } catch (err) {
+      toast('Failed to save batch: ' + err.message, 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleAddEntry = async (e) => {
     e.preventDefault();
     const data = {
@@ -547,8 +937,8 @@
       await callAppsScript('addEntry', data);
       toast('Entry created', 'success');
       if (data.sendSms && data.phoneNumber) {
-        const feeText = data.bookingFee ? ' بکنگ فیس: ' + data.bookingFee : '';
-        const msg = 'آپ کی بلٹی بک ہو گئی ہے۔' + feeText + + 'رضوان جٹ ٹرانسپورٹ گروپ 03446731002' + 'نوید 03481496487' + ' ہماری ٹرانسپورٹ سروس استعمال کرنے کا شکریہ۔' ;        sendSmsToDriver(data.phoneNumber, msg);
+        const msg = buildBookingSmsMessage(data.phoneNumber, data.bookingFee);
+        sendSmsToDriver(data.phoneNumber, msg);
       }
       e.target.reset();
       switchDashView('entries');
@@ -1102,6 +1492,8 @@
     $('#openAddFormBtn').addEventListener('click', () => switchDashView('add'));
     $('#cancelAddBtn').addEventListener('click', () => switchDashView('entries'));
     $('#addEntryForm').addEventListener('submit', handleAddEntry);
+    setupPlateAutocomplete();
+    injectBackdatedUI();
     $('#bulkDeleteBtn').addEventListener('click', handleBulkDelete);
 
     $('#selectAll').addEventListener('change', (e) => {
@@ -1231,15 +1623,21 @@
     });
     $('#adminCustomDate').addEventListener('change', loadGlobalEntries);
 
-    $('#searchInput').addEventListener('input', async (e) => {
-      const query = e.target.value.trim();
-      if (query.length < 2) { await loadOperatorData(); return; }
-      try {
-        const res = await callAppsScript('searchEntries', { query: query });
-        const entries = (res && (res.data || res.entries)) || [];
-        renderEntries(entries);
-        renderStats(entries);
-      } catch (err) { console.error(err); }
+    $('#searchInput').addEventListener('input', (e) => {
+      const query = e.target.value.trim().toLowerCase();
+      if (!query) {
+        renderEntries(allEntriesCache);
+        renderStats(allEntriesCache);
+        return;
+      }
+      const filtered = allEntriesCache.filter(entry => {
+        const plate = String(entry.TruckPlate || '').toLowerCase();
+        const driver = String(entry.DriverName || '').toLowerCase();
+        const phone = String(entry.PhoneNumber || '').toLowerCase();
+        return plate.includes(query) || driver.includes(query) || phone.includes(query);
+      });
+      renderEntries(filtered);
+      renderStats(filtered);
     });
 
     $('#printBtn').addEventListener('click', handlePrint);
