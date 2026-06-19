@@ -91,6 +91,7 @@
 
   const CONFIG = {
     appsScriptUrl: 'https://script.google.com/macros/s/AKfycbx0X3CqjInmOTYYdMakAQAp9ZbTopPYw_HuT5oZPO_oGeoo64s0lOymN4nrNcmHQBzp/exec',
+    adminKey: 'TMS_ADMIN_HARDCODED',
     firebase: {
       apiKey: 'AIzaSyDKRgkhRq1Rae9Zacx-6xGUt1VLyUAIbzg',
       authDomain: 'rizwan-nomi.firebaseapp.com',
@@ -339,6 +340,7 @@
     const password = $('#regPassword').value;
     const accountType = $('#regAccountType').value;
     const shopName = $('#regShopName').value.trim();
+    
     const btn = $('button[type="submit"]', form);
     btn.disabled = true;
 
