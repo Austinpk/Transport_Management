@@ -86,6 +86,36 @@
       color: #1e3a8a;
     }
     .btn-secondary:hover { background: #eef2ff; }
+
+    .toggle-switch {
+      position: relative;
+      display: inline-block;
+      width: 40px;
+      height: 22px;
+    }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .toggle-slider {
+      position: absolute;
+      cursor: pointer;
+      inset: 0;
+      background-color: #d1d5db;
+      transition: 0.2s;
+      border-radius: 22px;
+    }
+    .toggle-slider::before {
+      position: absolute;
+      content: "";
+      height: 16px;
+      width: 16px;
+      left: 3px;
+      bottom: 3px;
+      background-color: #fff;
+      transition: 0.2s;
+      border-radius: 50%;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+    }
+    .toggle-switch input:checked + .toggle-slider { background-color: #16a34a; }
+    .toggle-switch input:checked + .toggle-slider::before { transform: translateX(18px); }
   `;
   document.head.appendChild(__dateHeaderStyle);
 
@@ -169,14 +199,86 @@
     return 'pending';
   };
 
+  // In-memory cache of the admin session - immune to localStorage read timing issues.
+  let _adminSessionCache = null;
+
   const getAdminSession = () => {
+    // Prefer the in-memory cache if present
+    if (_adminSessionCache && _adminSessionCache.role === 'Admin') return _adminSessionCache;
     try {
       const raw = localStorage.getItem('tms_admin_session');
       if (!raw) return null;
       const data = JSON.parse(raw);
-      if (data && data.role === 'Admin') return data;
+      if (data && data.role === 'Admin') {
+        _adminSessionCache = data; // re-hydrate cache
+        return data;
+      }
       return null;
     } catch (e) { localStorage.removeItem('tms_admin_session'); return null; }
+  };
+
+  const setAdminSession = (data) => {
+    _adminSessionCache = data;
+    try { localStorage.setItem('tms_admin_session', JSON.stringify(data)); } catch (e) {}
+  };
+
+  const clearAdminSession = () => {
+    _adminSessionCache = null;
+    try { localStorage.removeItem('tms_admin_session'); } catch (e) {}
+  };
+
+  // ===== AUTO-REFRESH POLLING (every 5s) =====
+  let _pollTimer = null;
+  let _activeRefreshFn = null;
+
+  const setActiveRefresh = (fn) => {
+    _activeRefreshFn = fn;
+    startPolling();
+  };
+
+  // Returns true if the user is mid-interaction and a refresh would disrupt them.
+  const userIsBusy = () => {
+    if (document.hidden) return true;
+    // 1) ANY checkbox checked anywhere = user has a selection in progress -> never refresh
+    if (document.querySelector('input[type="checkbox"]:checked')) return true;
+    // 2) A form input / textarea / select currently focused
+    const ae = document.activeElement;
+    if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT')) return true;
+    // 3) Search box has text typed in
+    const anySearchHasText = Array.from(document.querySelectorAll('.admin-search-input, #searchInput'))
+      .some(inp => inp.value && inp.value.trim().length > 0);
+    if (anySearchHasText) return true;
+    // 4) A modal is open
+    const modalOpen = document.querySelector('.modal-overlay[style*="flex"], #userDetailModal:not([hidden]), #blacklistModal:not([hidden])');
+    if (modalOpen) return true;
+    return false;
+  };
+
+  const startPolling = () => {
+    if (_pollTimer) return; // already running
+    _pollTimer = setInterval(() => {
+      if (typeof _activeRefreshFn !== 'function') return;
+      if (userIsBusy()) return; // skip this cycle entirely - don't touch the DOM
+      try { _activeRefreshFn(); } catch (e) { /* ignore */ }
+    }, 8000);
+  };
+
+  const stopPolling = () => {
+    if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+    _activeRefreshFn = null;
+  };
+
+  // Fingerprint cache: lets a loader skip re-rendering when fetched data is unchanged,
+  // so a background poll never flickers the table or disturbs the page.
+  const _fingerprints = {};
+  const dataChanged = (key, entries) => {
+    const fp = JSON.stringify((entries || []).map(e => [
+      e.entryId || e.EntryID || e.uid || '', e.stage || e.Status || e.status || '',
+      e.sentToDistributor || '', e.bookingFee || '', e.phoneNumber || ''
+    ]));
+    if (_fingerprints[key] === fp) return false;
+    _fingerprints[key] = fp;
+    return true;
   };
 
   // ===== UPDATED: callAppsScript with token passthrough =====
@@ -193,7 +295,11 @@
       const adminSession = getAdminSession();
       if (adminSession) {
         requestBody.adminKey = CONFIG.adminKey;
-        requestBody.callerName = adminSession.displayName;
+        requestBody.callerName = adminSession.displayName || 'Admin';
+      } else if (_adminSessionCache && _adminSessionCache.role === 'Admin') {
+        // Extra safety: cache says admin even if getAdminSession momentarily missed it
+        requestBody.adminKey = CONFIG.adminKey;
+        requestBody.callerName = _adminSessionCache.displayName || 'Admin';
       } else if (auth.currentUser) {
         // Only add token if one wasn't already provided in the payload
         // (e.g., registration sends its own token)
@@ -307,7 +413,7 @@
             status: 'Approved',
             accountType: 'Admin'
           };
-          localStorage.setItem('tms_admin_session', JSON.stringify(adminData));
+          setAdminSession(adminData);
           $('#adminUserName').textContent = adminData.displayName;
           showScreen('admin');
           await loadAdminData();
@@ -391,11 +497,15 @@
     } else if (accountType === 'Weightman') {
       $('#weightUserName').textContent = name;
       showScreen('weightman');
+      injectWeightmanFeeField();
       loadWeightmanData();
+      setActiveRefresh(loadWeightmanData);
     } else if (accountType === 'Distributor') {
       $('#distUserName').textContent = name;
       showScreen('distributor');
+      injectDistAllListView();   // ensure Weightman List nav item exists
       loadDistributorData();
+      setActiveRefresh(loadDistributorData);
     } else {
       $('#dashUserName').textContent = name;
       $('#dashUserRole').textContent = accountType || 'Operator';
@@ -423,7 +533,8 @@
   };
 
   const handleLogout = () => {
-    localStorage.removeItem('tms_admin_session');
+    stopPolling();
+    clearAdminSession();
     if (auth.currentUser) {
       auth.signOut().then(() => toast('Signed out', 'success')).catch(() => {});
     } else {
@@ -432,20 +543,23 @@
     showScreen('auth');
   };
 
-  // ============ PAGE LOAD ============
-  document.addEventListener('DOMContentLoaded', async () => {
+  // ============ PAGE LOAD (session restore) ============
+  // NOTE: merged into the single init() DOMContentLoaded listener below to avoid
+  // a race where two separate listeners fight over which screen to show.
+  const restoreSession = async () => {
     const savedAdmin = localStorage.getItem('tms_admin_session');
     if (savedAdmin) {
       try {
         const adminData = JSON.parse(savedAdmin);
         if (adminData.role === 'Admin') {
+          _adminSessionCache = adminData; // hydrate in-memory cache BEFORE any callAppsScript runs
           $('#adminUserName').textContent = adminData.displayName || 'Admin';
           showScreen('admin');
           try { await loadAdminData(); } catch (err) { console.error(err); }
           setLoading(false);
           return;
         }
-      } catch (e) { localStorage.removeItem('tms_admin_session'); }
+      } catch (e) { clearAdminSession(); }
     }
     auth.onAuthStateChanged(async (user) => {
       if (user) {
@@ -462,7 +576,7 @@
         setLoading(false);
       }
     });
-  });
+  };
 
   // ============ OPERATOR DASHBOARD ============
   let selectedEntries = new Set();
@@ -965,12 +1079,16 @@
     if (target) target.classList.add('active');
     const titles = { weightEntries: 'My Weight Entries', addWeight: 'Add Weight Entry' };
     $('#weightTitle').textContent = titles[view] || 'Weight Entries';
+    if (view === 'addWeight') { injectWeightmanFeeField(); stopPolling(); }
+    if (view === 'weightEntries') { loadWeightmanData(); setActiveRefresh(loadWeightmanData); }
   };
 
   const loadWeightmanData = async () => {
     try {
-      const res = await callAppsScript('getWeightEntries', {});
+      const res = await callAppsScript('getPipeline', {});
       const entries = (res && (res.data || res.entries)) || [];
+      // Newest first
+      entries.sort((a, b) => new Date(b.bookedTime || 0) - new Date(a.bookedTime || 0));
       renderWeightEntries(entries);
     } catch (err) { toast('Load failed: ' + err.message, 'error'); }
   };
@@ -981,21 +1099,33 @@
       tbody.innerHTML = '<tr><td colspan="10" class="empty-state">No entries yet</td></tr>';
       return;
     }
+    // Header is: Plate, Driver, Phone, Status, Pending, Paid(repurposed=Auto), Approved, Loading, Transit, Delivered
     tbody.innerHTML = entries.map(e => {
-      const status = escapeHtml(e.Status || 'Pending');
+      const stage = escapeHtml(e.stage || 'Pending');
       return '<tr>' +
-        '<td><strong>' + escapeHtml(e.TruckPlate) + '</strong></td>' +
-        '<td>' + escapeHtml(e.DriverName) + '</td>' +
-        '<td>' + escapeHtml(e.PhoneNumber) + '</td>' +
-        '<td><span class="status-pill ' + statusClass(status) + '">' + status + '</span></td>' +
-        '<td>' + formatDate(e.PendingTime) + '</td>' +
-        '<td>' + formatDate(e.PaidTime) + '</td>' +
-        '<td>' + formatDate(e.ApprovedTime) + '</td>' +
-        '<td>' + formatDate(e.LoadingTime) + '</td>' +
-        '<td>' + formatDate(e.TransitTime) + '</td>' +
-        '<td>' + formatDate(e.DeliveredTime) + '</td>' +
+        '<td><strong>' + escapeHtml(e.truckPlate) + '</strong></td>' +
+        '<td>' + escapeHtml(e.driverName) + '</td>' +
+        '<td>' + escapeHtml(e.phoneNumber) + '</td>' +
+        '<td><span class="status-pill ' + statusClass(stage) + '">' + stage + '</span></td>' +
+        '<td>' + formatDate(e.bookedTime) + '</td>' +
+        '<td>' + (e.autoApproved ? '<span class="status-pill active">Auto</span>' : '—') + '</td>' +
+        '<td>' + formatDate(e.approvedTime) + '</td>' +
+        '<td>' + formatDate(e.loadingTime) + '</td>' +
+        '<td>' + formatDate(e.transitTime) + '</td>' +
+        '<td>' + formatDate(e.deliveredTime) + '</td>' +
       '</tr>';
     }).join('');
+  };
+
+  // Injects a "Fee Charged" field into the Weightman add-entry form (default 50)
+  const injectWeightmanFeeField = () => {
+    if ($('#wFee')) return;
+    const addressGroup = $('#wAddress') ? $('#wAddress').closest('.form-group') : null;
+    if (!addressGroup) return;
+    const feeGroup = document.createElement('div');
+    feeGroup.className = 'form-group';
+    feeGroup.innerHTML = '<label for="wFee">Fee Charged (Rs.)</label><input type="number" id="wFee" value="50" min="0" step="1" />';
+    addressGroup.parentNode.insertBefore(feeGroup, addressGroup.nextSibling);
   };
 
   const handleAddWeightEntry = async (e) => {
@@ -1005,8 +1135,9 @@
     const driverName = $('#wDriverName').value.trim();
     const phoneNumber = $('#wPhoneNumber').value.trim();
     const address = $('#wAddress').value.trim();
+    const fee = $('#wFee') ? $('#wFee').value.trim() : '50';
     
-    console.log('Weight form values:', { truckPlate, driverName, phoneNumber, address });
+    console.log('Weight form values:', { truckPlate, driverName, phoneNumber, address, fee });
     
     if (!truckPlate) {
       toast('Truck Plate is required', 'warning');
@@ -1028,7 +1159,8 @@
       truckPlate: truckPlate,
       driverName: driverName,
       phoneNumber: phoneNumber,
-      address: address
+      address: address,
+      bookingFee: fee || '50'
     };
     
     try {
@@ -1061,43 +1193,202 @@
     $$('#distributorScreen .view').forEach(v => v.classList.remove('active'));
     const target = $('#' + view + 'View');
     if (target) target.classList.add('active');
-    const titles = { distList: 'Approved List', distSent: 'Sent Requests' };
+    const titles = { distList: 'Approved List', distAll: 'Weightman List (View Only)', distSent: 'Sent Requests' };
     $('#distTitle').textContent = titles[view] || 'Approved List';
-    if (view === 'distSent') loadDistSent();
+    if (view === 'distList') { loadDistributorData(); setActiveRefresh(loadDistributorData); }
+    if (view === 'distAll') { loadDistWeightmanList(); setActiveRefresh(loadDistWeightmanList); }
+    if (view === 'distSent') { loadDistSent(); setActiveRefresh(loadDistSent); }
   };
 
-  const loadDistributorData = async () => {
+  // Point: Distributor sees the full Weightman list (read-only, all stages) just like Admin does.
+  const injectDistAllListView = () => {
+    if ($('#distAllView')) return;
+
+    const nav = document.querySelector('#distributorScreen .sidebar-nav');
+    if (nav && !document.querySelector('[data-view="distAll"]')) {
+      const navItem = document.createElement('a');
+      navItem.href = '#';
+      navItem.className = 'nav-item';
+      navItem.dataset.view = 'distAll';
+      navItem.innerHTML = '<i class="fa-solid fa-list"></i><span>Weightman List</span>';
+      // Insert right after the first nav item (Approved List)
+      const firstItem = nav.querySelector('.nav-item');
+      if (firstItem && firstItem.nextSibling) nav.insertBefore(navItem, firstItem.nextSibling);
+      else nav.appendChild(navItem);
+      navItem.addEventListener('click', (e) => { e.preventDefault(); switchDistView('distAll'); });
+    }
+
+    const main = document.querySelector('#distributorScreen .main-content');
+    if (main) {
+      const view = document.createElement('div');
+      view.id = 'distAllView';
+      view.className = 'view';
+      view.innerHTML =
+        '<div class="view-header"><div><h3>Weightman List (Read-Only)</h3><p class="muted">All submissions from Weightman accounts at every stage. Call drivers directly; only Admin can approve or move stages here.</p></div></div>' +
+        '<div class="table-wrapper">' +
+          '<table class="data-table">' +
+            '<thead><tr><th>Plate</th><th>Driver</th><th>Phone</th><th>Shop</th><th>Stage</th><th>Booked</th><th>Approved</th><th>Loading</th><th>Transit</th><th>Delivered</th><th>Call</th></tr></thead>' +
+            '<tbody id="distAllTbody"><tr><td colspan="11" class="empty-state">Loading...</td></tr></tbody>' +
+          '</table>' +
+        '</div>';
+      main.appendChild(view);
+    }
+  };
+
+  const loadDistWeightmanList = async () => {
+    injectDistAllListView();
     try {
+      const res = await callAppsScript('getPipeline', {});
+      let entries = (res && (res.data || res.entries)) || [];
+      entries.sort((a, b) => new Date(b.bookedTime || 0) - new Date(a.bookedTime || 0));
+      const tbody = $('#distAllTbody');
+      if (!entries.length) { tbody.innerHTML = '<tr><td colspan="11" class="empty-state">No entries yet</td></tr>'; return; }
+      tbody.innerHTML = entries.map(e => {
+        const phoneLink = e.phoneNumber ? '<a href="tel:' + escapeHtml(e.phoneNumber) + '" class="btn-icon" title="Call"><i class="fa-solid fa-phone"></i></a>' : '—';
+        return '<tr>' +
+          '<td><strong>' + escapeHtml(e.truckPlate) + '</strong></td>' +
+          '<td>' + escapeHtml(e.driverName) + '</td>' +
+          '<td>' + escapeHtml(e.phoneNumber) + '</td>' +
+          '<td>' + escapeHtml(e.shopName || e.weightmanName || '—') + '</td>' +
+          '<td><span class="status-pill ' + statusClass(e.stage) + '">' + escapeHtml(e.stage || 'Pending') + '</span></td>' +
+          '<td>' + formatDate(e.bookedTime) + '</td>' +
+          '<td>' + formatDate(e.approvedTime) + '</td>' +
+          '<td>' + formatDate(e.loadingTime) + '</td>' +
+          '<td>' + formatDate(e.transitTime) + '</td>' +
+          '<td>' + formatDate(e.deliveredTime) + '</td>' +
+          '<td>' + phoneLink + '</td>' +
+        '</tr>';
+      }).join('');
+    } catch (err) { toast('Load failed: ' + err.message, 'error'); }
+  };
+
+  // Point 2: Distributor sees the Approved list (shared from Admin's approvals),
+  // can select drivers via checkboxes, call them directly, and either send SMS
+  // directly (only when global Auto-Approval is ON - moves to Loading)
+  // or request Admin to send on his behalf (always available).
+  let distApprovedCache = [];
+  let distAutoApprovalOn = false;
+
+  const loadDistributorData = async () => {
+    injectDistributorActionButtons();
+    try {
+      const statusRes = await callAppsScript('getAutoApprovalStatus', {});
+      distAutoApprovalOn = !!(statusRes && statusRes.enabled);
+      updateDistSendButtonState();
+
       const res = await callAppsScript('getDistributorList', {});
       const entries = (res && (res.data || res.entries)) || [];
-      renderDistList(entries);
+      distApprovedCache = entries;
+      // Diagnostic: if backend explicitly rejected access, surface why
+      if (res && res.success === false) {
+        const tbody = $('#distListTbody');
+        if (tbody) tbody.innerHTML = '<tr><td colspan="10" class="empty-state">Access issue: ' + escapeHtml(res.error || 'unknown') + '</td></tr>';
+        return;
+      }
+      if (dataChanged('distList', entries)) renderDistList(entries);
     } catch (err) { 
       toast('Load failed: ' + err.message, 'error'); 
     }
   };
 
+  const updateDistSendButtonState = () => {
+    const sendBtn = $('#distSendSmsBtn');
+    if (!sendBtn) return;
+    if (distAutoApprovalOn) {
+      sendBtn.title = 'Send SMS and move selected drivers to Loading';
+    } else {
+      sendBtn.title = 'Disabled — Auto-Approval is OFF. Only Admin can move entries to Loading right now.';
+    }
+    // Re-evaluate disabled state based on both selection AND auto-approval
+    sendBtn.disabled = distSelected.size === 0 || !distAutoApprovalOn;
+  };
+
   const renderDistList = (entries) => {
     const tbody = $('#distListTbody');
     if (!entries.length) {
-      tbody.innerHTML = '<tr><td colspan="10" class="empty-state">No approved entries</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="10" class="empty-state">No approved entries waiting</td></tr>';
       return;
     }
     tbody.innerHTML = entries.map(e => {
       const id = escapeHtml(e.entryId);
-      const phoneLink = e.phoneNumber ? '<a href="tel:' + escapeHtml(e.phoneNumber) + '" class="phone-link"><i class="fa-solid fa-phone"></i></a>' : '';
+      const phoneLink = e.phoneNumber ? '<a href="tel:' + escapeHtml(e.phoneNumber) + '" class="btn-icon" title="Call"><i class="fa-solid fa-phone"></i></a>' : '—';
       return '<tr data-id="' + id + '">' +
         '<td><input type="checkbox" class="dist-check" data-id="' + id + '" /></td>' +
         '<td><strong>' + escapeHtml(e.truckPlate) + '</strong></td>' +
         '<td>' + escapeHtml(e.driverName) + '</td>' +
-        '<td>' + escapeHtml(e.phoneNumber) + ' ' + phoneLink + '</td>' +
-        '<td>' + escapeHtml(e.shopName || '—') + '</td>' +
-        '<td>' + escapeHtml(e.operatorName) + '</td>' +
-        '<td>' + formatDate(e.pendingTime) + '</td>' +
+        '<td>' + escapeHtml(e.phoneNumber) + '</td>' +
+        '<td>' + escapeHtml(e.shopName || e.weightmanName || '—') + '</td>' +
+        '<td>' + escapeHtml(e.weightmanName || '—') + '</td>' +
+        '<td>' + formatDate(e.bookedTime) + '</td>' +
         '<td>' + formatDate(e.approvedTime) + '</td>' +
-        '<td>' + (e.distributorNotified ? '<span class="status-pill active">Yes</span>' : '<span class="status-pill pending">No</span>') + '</td>' +
-        '<td><button class="btn btn-success btn-sm send-sms-btn" data-id="' + id + '" data-phone="' + escapeHtml(e.phoneNumber) + '"><i class="fa-solid fa-paper-plane"></i> SMS</button></td>' +
+        '<td><span class="status-pill approved">Approved</span></td>' +
+        '<td>' + phoneLink + '</td>' +
       '</tr>';
     }).join('');
+  };
+
+  // Inject "Send SMS" (gated by Auto-Approval) + "Request Admin to Send" buttons
+  const injectDistributorActionButtons = () => {
+    const oldBulkBtn = $('#sendBulkSmsBtn');
+    if (!oldBulkBtn || $('#distSendSmsBtn')) return;
+    oldBulkBtn.style.display = 'none';
+
+    const autoNote = document.createElement('span');
+    autoNote.id = 'distAutoNote';
+    autoNote.className = 'muted';
+    autoNote.style.cssText = 'font-size:12px;margin-right:10px;';
+
+    const sendBtn = document.createElement('button');
+    sendBtn.id = 'distSendSmsBtn';
+    sendBtn.className = 'btn btn-success btn-sm';
+    sendBtn.disabled = true;
+    sendBtn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Send to Loading (SMS)';
+    sendBtn.style.marginRight = '8px';
+
+    const requestBtn = document.createElement('button');
+    requestBtn.id = 'distRequestAdminBtn';
+    requestBtn.className = 'btn btn-secondary btn-sm';
+    requestBtn.disabled = true;
+    requestBtn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Request Admin to Send';
+
+    oldBulkBtn.parentNode.insertBefore(autoNote, oldBulkBtn);
+    oldBulkBtn.parentNode.insertBefore(sendBtn, oldBulkBtn);
+    oldBulkBtn.parentNode.insertBefore(requestBtn, oldBulkBtn);
+
+    sendBtn.addEventListener('click', handleDistSendSmsDirect);
+    requestBtn.addEventListener('click', handleDistRequestAdmin);
+  };
+
+  const handleDistSendSmsDirect = async () => {
+    if (distSelected.size === 0) { toast('Select drivers first', 'warning'); return; }
+    if (!distAutoApprovalOn) { toast('Auto-Approval is OFF. Use "Request Admin to Send" instead.', 'warning'); return; }
+    const msg = 'لوڈنگ کے لیے اپنی گاڑی تیار کریں۔ شکریہ۔';
+    try {
+      setLoading(true);
+      const res = await callAppsScript('distributorSendSms', { entryIds: [...distSelected], message: msg });
+      if (res.movedEntries) {
+        res.movedEntries.forEach(entry => {
+          if (entry.phoneNumber) sendSmsToDriver(entry.phoneNumber, res.loadingMessage || msg);
+        });
+      }
+      toast('SMS sent to ' + (res.count || 0) + ' drivers — group formed and moved to Loading', 'success');
+      distSelected.clear();
+      await loadDistributorData();
+    } catch (err) { toast('Failed: ' + err.message, 'error'); }
+    finally { setLoading(false); }
+  };
+
+  const handleDistRequestAdmin = async () => {
+    if (distSelected.size === 0) { toast('Select drivers first', 'warning'); return; }
+    try {
+      setLoading(true);
+      await callAppsScript('distributorRequestAdmin', { entryIds: [...distSelected] });
+      toast('Request sent to Admin for ' + distSelected.size + ' drivers', 'success');
+      distSelected.clear();
+      $('#distSendSmsBtn').disabled = true;
+      $('#distRequestAdminBtn').disabled = true;
+    } catch (err) { toast('Failed: ' + err.message, 'error'); }
+    finally { setLoading(false); }
   };
 
   const loadDistSent = async () => {
@@ -1108,31 +1399,6 @@
       if (!groups.length) { tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No groups</td></tr>'; return; }
       tbody.innerHTML = groups.map(g => '<tr><td>' + escapeHtml(g.groupId) + '</td><td>' + formatDate(g.timestamp) + '</td><td>' + g.drivers.length + ' drivers</td><td>' + (g.messageSent ? '<span class="status-pill active">Yes</span>' : '<span class="status-pill pending">No</span>') + '</td></tr>').join('');
     } catch (err) { toast('Load failed: ' + err.message, 'error'); }
-  };
-
-  const sendDistSms = async (entryId, phone) => {
-    if (!phone) { toast('No phone number', 'warning'); return; }
-    const msg = 'لوڈنگ کے لیے اپنی گاڑی تیار کریں۔ شکریہ۔';
-    try {
-      await callAppsScript('sendLoadingSMS', { entryIds: [entryId], message: msg });
-      sendSmsToDriver(phone, msg);
-      toast('SMS sent', 'success');
-    } catch (err) { toast('Failed: ' + err.message, 'error'); }
-  };
-
-  const sendBulkDistSms = async () => {
-    if (distSelected.size === 0) { toast('Select entries first', 'warning'); return; }
-    const msg = 'لوڈنگ کے لیے اپنی گاڑی تیار کریں۔ شکریہ۔';
-    try {
-      setLoading(true);
-      await callAppsScript('sendLoadingSMS', { entryIds: [...distSelected], message: msg });
-      const entries = allEntriesCache.filter(e => distSelected.has(e.entryId));
-      entries.forEach(e => { if (e.phoneNumber) sendSmsToDriver(e.phoneNumber, msg); });
-      toast('SMS sent to ' + distSelected.size + ' drivers', 'success');
-      distSelected.clear();
-      await loadDistributorData();
-    } catch (err) { toast('Failed: ' + err.message, 'error'); }
-    finally { setLoading(false); }
   };
 
   // ============ ADMIN ============
@@ -1147,20 +1413,25 @@
     const titles = {
       users: 'User Management', pending: 'Pending (Weight)', approved: 'Approved List',
       loading: 'Loading Queue', transit: 'In Transit', delivered: 'Delivered',
+      record: 'Record Room', distRequests: 'Distributor Requests',
       global: 'Operator Entries', activities: 'User Activities'
     };
     $('#adminTitle').textContent = titles[view] || 'Admin';
-    if (view === 'pending') loadPendingEntries();
-    if (view === 'approved') loadApprovedList();
-    if (view === 'loading') loadLoadingQueue();
-    if (view === 'transit') loadTransitList();
-    if (view === 'delivered') loadDeliveredList();
-    if (view === 'global') loadGlobalEntries();
-    if (view === 'activities') loadActivities();
+    if (view === 'users') { loadUsers(); setActiveRefresh(loadUsers); }
+    if (view === 'pending') { loadPendingEntries(); setActiveRefresh(loadPendingEntries); }
+    if (view === 'approved') { loadApprovedList(); setActiveRefresh(loadApprovedList); }
+    if (view === 'loading') { loadLoadingQueue(); setActiveRefresh(loadLoadingQueue); }
+    if (view === 'transit') { loadTransitList(); setActiveRefresh(loadTransitList); }
+    if (view === 'delivered') { loadDeliveredList(); setActiveRefresh(loadDeliveredList); }
+    if (view === 'record') { loadRecordRoom(); setActiveRefresh(loadRecordRoom); }
+    if (view === 'distRequests') { loadDistRequests(); setActiveRefresh(loadDistRequests); }
+    if (view === 'global') { loadGlobalEntries(); setActiveRefresh(loadGlobalEntries); }
+    if (view === 'activities') { loadActivities(); setActiveRefresh(loadActivities); }
   };
 
   const loadAdminData = async () => {
     await Promise.all([loadUsers(), loadPendingEntries()]);
+    setActiveRefresh(loadPendingEntries); // default poll: pending list (where new entries arrive)
   };
 
   const loadUsers = async () => {
@@ -1171,22 +1442,80 @@
     } catch (err) { toast('Load failed: ' + err.message, 'error'); }
   };
 
+  // Inject ShopName and Auto-Approve header columns into Users table (without editing index.html)
+  const ensureUsersTableHeaders = () => {
+    const headRow = document.querySelector('#usersTbody').closest('table').querySelector('thead tr');
+    if (!headRow || headRow.dataset.extended) return;
+    const statusTh = Array.from(headRow.children).find(th => th.textContent.trim() === 'Status');
+    const shopTh = document.createElement('th');
+    shopTh.textContent = 'Shop Name';
+    if (statusTh) headRow.insertBefore(shopTh, statusTh.previousElementSibling.nextSibling);
+    else headRow.appendChild(shopTh);
+
+    const actionsTh = Array.from(headRow.children).find(th => th.textContent.trim() === 'Actions');
+    const autoTh = document.createElement('th');
+    autoTh.textContent = 'Auto-Approve';
+    if (actionsTh) headRow.insertBefore(autoTh, actionsTh);
+    else headRow.appendChild(autoTh);
+
+    headRow.dataset.extended = 'true';
+  };
+
   const renderUsers = (users) => {
+    ensureUsersTableHeaders();
     const tbody = $('#usersTbody');
-    if (!users.length) { tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No users</td></tr>'; return; }
+    if (!users.length) { tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No users</td></tr>'; return; }
     tbody.innerHTML = users.map(u => {
       const uid = escapeHtml(u.uid || '');
       const st = (u.status || 'pending').toLowerCase();
       const isDisabled = st === 'disabled' || st === 'suspended';
       const isPending = st === 'pending';
+      const isWeightman = (u.accountType || '') === 'Weightman';
       let actionBtn;
       if (isPending || isDisabled) {
         actionBtn = '<button class="btn btn-success btn-sm approve-btn" data-id="' + uid + '"><i class="fa-solid fa-check"></i> Approve</button>';
       } else {
         actionBtn = '<button class="btn btn-danger btn-sm disable-btn" data-id="' + uid + '"><i class="fa-solid fa-ban"></i> Disable</button>';
       }
-      return '<tr><td><a href="#" class="user-name-link" data-uid="' + uid + '"><strong>' + escapeHtml(u.name || '—') + '</strong></a></td><td>' + escapeHtml(u.email || '—') + '</td><td><span class="badge">' + escapeHtml(u.accountType || 'Operator') + '</span></td><td><span class="badge ' + (u.role === 'Admin' ? 'admin' : '') + '">' + escapeHtml(u.role || 'operator') + '</span></td><td><span class="status-pill ' + statusClass(u.status) + '">' + escapeHtml(u.status || 'pending') + '</span></td><td>' + formatDateShort(u.dateRegistered) + '</td><td class="actions-cell">' + actionBtn + '</td></tr>';
+      const deleteBtn = '<button class="btn-icon danger delete-user-btn" data-id="' + uid + '" data-name="' + escapeHtml(u.name || '') + '" title="Delete user"><i class="fa-solid fa-trash"></i></button>';
+      const autoApproveToggle = isWeightman
+        ? '<label class="toggle-switch" title="Auto-approve this Weightman\'s submissions">' +
+            '<input type="checkbox" class="auto-approve-toggle" data-id="' + uid + '" ' + (u.autoApprove ? 'checked' : '') + ' />' +
+            '<span class="toggle-slider"></span>' +
+          '</label>'
+        : '<span class="muted">—</span>';
+      const shopCell = isWeightman ? (escapeHtml(u.shopName || '—')) : '—';
+      return '<tr><td><a href="#" class="user-name-link" data-uid="' + uid + '"><strong>' + escapeHtml(u.name || '—') + '</strong></a></td>' +
+        '<td>' + escapeHtml(u.email || '—') + '</td>' +
+        '<td><span class="badge">' + escapeHtml(u.accountType || 'Operator') + '</span></td>' +
+        '<td>' + shopCell + '</td>' +
+        '<td><span class="badge ' + (u.role === 'Admin' ? 'admin' : '') + '">' + escapeHtml(u.role || 'operator') + '</span></td>' +
+        '<td><span class="status-pill ' + statusClass(u.status) + '">' + escapeHtml(u.status || 'pending') + '</span></td>' +
+        '<td>' + formatDateShort(u.dateRegistered) + '</td>' +
+        '<td>' + autoApproveToggle + '</td>' +
+        '<td class="actions-cell">' + actionBtn + ' ' + deleteBtn + '</td></tr>';
     }).join('');
+  };
+
+  const handleDeleteUser = async (uid, name) => {
+    if (!confirm('Delete user "' + name + '" permanently? This cannot be undone.')) return;
+    try {
+      setLoading(true);
+      await callAppsScript('deleteUser', { targetUid: uid });
+      toast('User deleted', 'success');
+      await loadUsers();
+    } catch (err) { toast('Failed: ' + err.message, 'error'); }
+    finally { setLoading(false); }
+  };
+
+  const handleToggleAutoApproval = async (uid, checked) => {
+    try {
+      await callAppsScript('setAutoApproval', { targetUid: uid, autoApprove: checked });
+      toast('Auto-approval ' + (checked ? 'enabled' : 'disabled'), 'success');
+    } catch (err) {
+      toast('Failed: ' + err.message, 'error');
+      await loadUsers(); // revert toggle visually on failure
+    }
   };
 
   const showUserDetails = async (uid) => {
@@ -1229,168 +1558,430 @@
     finally { setLoading(false); }
   };
 
+  // ===================== PIPELINE: Pending (Weightman submissions awaiting approval) =====================
   const loadPendingEntries = async () => {
+    injectAutoApprovalToggle();
     try {
-      const res = await callAppsScript('getWeightEntries', { statusFilter: 'Pending' });
+      const res = await callAppsScript('getPipeline', { stageFilter: 'Pending' });
       let entries = (res && (res.data || res.entries)) || [];
-      entries.sort((a, b) => {
-        const timeA = new Date(a.PendingTime || a.Timestamp);
-        const timeB = new Date(b.PendingTime || b.Timestamp);
-        return timeA - timeB;
-      });
-      renderPendingEntries(entries);
+      entries.sort((a, b) => new Date(a.bookedTime || 0) - new Date(b.bookedTime || 0));
+      if (dataChanged('pending', entries)) renderPendingEntries(entries);
     } catch (err) { toast('Load failed: ' + err.message, 'error'); }
   };
 
-  const renderPendingEntries = (entries) => {
-    const tbody = $('#pendingTbody');
-    if (!entries.length) { tbody.innerHTML = '<tr><td colspan="10" class="empty-state">No pending entries</td></tr>'; return; }
-    tbody.innerHTML = entries.map(e => {
-      const id = escapeHtml(e.EntryID);
-      const status = escapeHtml(e.Status);
-      return '<tr data-id="' + id + '">' +
-        '<td><input type="checkbox" class="pending-check" data-id="' + id + '" /></td>' +
-        '<td><strong>' + escapeHtml(e.TruckPlate) + '</strong></td>' +
-        '<td>' + escapeHtml(e.DriverName) + '</td>' +
-        '<td>' + escapeHtml(e.PhoneNumber) + '</td>' +
-        '<td>' + escapeHtml(e.OperatorName) + '</td>' +
-        '<td><span class="status-pill ' + statusClass(status) + '">' + status + '</span></td>' +
-        '<td>' + formatDate(e.PendingTime) + '</td>' +
-        '<td>' + formatDate(e.PaidTime) + '</td>' +
-        '<td>' + escapeHtml(e.BookingFee || '—') + '</td>' +
-        '<td class="actions-cell"><button class="btn btn-success btn-sm mark-paid-btn" data-id="' + id + '"><i class="fa-solid fa-money-bill"></i> Paid</button></td>' +
-      '</tr>';
-    }).join('');
+  const ensurePendingTableHeaders = () => {
+    const headRow = document.querySelector('#pendingTbody').closest('table').querySelector('thead tr');
+    if (!headRow || headRow.dataset.extended) return;
+    const serialTh = document.createElement('th');
+    serialTh.textContent = '#';
+    headRow.insertBefore(serialTh, headRow.firstElementChild.nextSibling);
+    headRow.dataset.extended = 'true';
   };
 
-  const handleMarkPaid = async (entryId) => {
-    try {
-      setLoading(true);
-      await callAppsScript('updateWeightEntryStatus', { entryId: entryId, newStatus: 'Paid' });
-      toast('Marked as Paid', 'success');
-      await loadPendingEntries();
-    } catch (err) { toast('Failed: ' + err.message, 'error'); }
-    finally { setLoading(false); }
+  const renderPendingEntries = (entries) => {
+    ensurePendingTableHeaders();
+    const tbody = $('#pendingTbody');
+    if (!entries.length) { tbody.innerHTML = '<tr><td colspan="11" class="empty-state">No pending entries</td></tr>'; return; }
+    tbody.innerHTML = entries.map((e, idx) => {
+      const id = escapeHtml(e.entryId);
+      return '<tr data-id="' + id + '">' +
+        '<td><input type="checkbox" class="pending-check" data-id="' + id + '" /></td>' +
+        '<td><strong>' + (idx + 1) + '</strong></td>' +
+        '<td><strong>' + escapeHtml(e.truckPlate) + '</strong></td>' +
+        '<td>' + escapeHtml(e.driverName) + '</td>' +
+        '<td>' + escapeHtml(e.phoneNumber) + '</td>' +
+        '<td>' + escapeHtml(e.shopName || e.weightmanName || '—') + '</td>' +
+        '<td><span class="status-pill pending">Pending</span></td>' +
+        '<td>' + formatDate(e.bookedTime) + '</td>' +
+        '<td>' + escapeHtml(e.address || '—') + '</td>' +
+        '<td>' + escapeHtml(e.bookingFee || '—') + '</td>' +
+        '<td class="actions-cell">—</td>' +
+      '</tr>';
+    }).join('');
   };
 
   const handleApproveBulk = async () => {
     if (pendingSelected.size === 0) { toast('Select entries first', 'warning'); return; }
     try {
       setLoading(true);
-      await callAppsScript('approveWeightEntries', { entryIds: [...pendingSelected] });
+      await callAppsScript('approvePipelineEntries', { entryIds: [...pendingSelected] });
       toast('Approved ' + pendingSelected.size + ' entries', 'success');
       pendingSelected.clear();
+      $('#approveBulkBtn').disabled = true;
+      await loadPendingEntries();
+    } catch (err) { toast('Failed: ' + err.message, 'error'); }
+    finally { setLoading(false); }
+  };
+
+  // Point 1: Global auto-approval toggle - keeps Approved list refilled to 15 from oldest Pending
+  const injectAutoApprovalToggle = () => {
+    const approveBtn = $('#approveBulkBtn');
+    if (!approveBtn || $('#autoApprovalBtn')) return;
+    const btn = document.createElement('button');
+    btn.id = 'autoApprovalBtn';
+    btn.className = 'btn btn-secondary btn-sm';
+    btn.style.marginLeft = '8px';
+    btn.innerHTML = '<i class="fa-solid fa-bolt"></i> Auto-Approval: Off';
+    approveBtn.parentNode.appendChild(btn);
+    btn.addEventListener('click', handleToggleAutoApprovalGlobal);
+    refreshAutoApprovalButton();
+  };
+
+  const refreshAutoApprovalButton = async () => {
+    try {
+      const res = await callAppsScript('getAutoApprovalStatus', {});
+      const btn = $('#autoApprovalBtn');
+      if (!btn) return;
+      if (res.enabled) {
+        btn.innerHTML = '<i class="fa-solid fa-bolt"></i> Auto-Approval: ON (Top 15)';
+        btn.classList.add('btn-success');
+        btn.classList.remove('btn-secondary');
+      } else {
+        btn.innerHTML = '<i class="fa-solid fa-bolt"></i> Auto-Approval: Off';
+        btn.classList.remove('btn-success');
+        btn.classList.add('btn-secondary');
+      }
+    } catch (err) { /* silent */ }
+  };
+
+  const handleToggleAutoApprovalGlobal = async () => {
+    try {
+      setLoading(true);
+      const res = await callAppsScript('getAutoApprovalStatus', {});
+      const newState = !res.enabled;
+      const result = await callAppsScript('setAutoApprovalGlobal', { enabled: newState });
+      toast('Auto-approval ' + (newState ? 'enabled — keeping top 15 approved' : 'disabled'), 'success');
+      if (result.refilledCount) toast('Auto-approved ' + result.refilledCount + ' entries', 'success');
+      await refreshAutoApprovalButton();
       await loadPendingEntries();
       await loadApprovedList();
     } catch (err) { toast('Failed: ' + err.message, 'error'); }
     finally { setLoading(false); }
   };
 
+  // ===================== PIPELINE: Approved (ready to send to distributor / set loading) =====================
   const loadApprovedList = async () => {
     try {
-      const res = await callAppsScript('getApprovedList', {});
-      const entries = (res && (res.data || res.entries)) || [];
-      renderApprovedList(entries);
+      const res = await callAppsScript('getPipeline', { stageFilter: 'Approved' });
+      let entries = (res && (res.data || res.entries)) || [];
+      entries.sort((a, b) => new Date(a.approvedTime || 0) - new Date(b.approvedTime || 0));
+      if (dataChanged('approved', entries)) renderApprovedList(entries);
     } catch (err) { toast('Load failed: ' + err.message, 'error'); }
   };
 
   const renderApprovedList = (entries) => {
     const tbody = $('#approvedTbody');
-    if (!entries.length) { tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No approved entries</td></tr>'; return; }
+    if (!entries.length) { tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No approved entries</td></tr>'; return; }
     tbody.innerHTML = entries.map(e => {
       const id = escapeHtml(e.entryId);
+      const sentBadge = e.sentToDistributor ? ' <span class="status-pill active" style="font-size:10px;">Sent</span>' : '';
       return '<tr data-id="' + id + '">' +
         '<td><input type="checkbox" class="approved-check" data-id="' + id + '" /></td>' +
-        '<td><strong>' + escapeHtml(e.truckPlate) + '</strong></td>' +
+        '<td><strong>' + escapeHtml(e.truckPlate) + '</strong>' + sentBadge + '</td>' +
         '<td>' + escapeHtml(e.driverName) + '</td>' +
         '<td>' + escapeHtml(e.phoneNumber) + '</td>' +
-        '<td>' + escapeHtml(e.operatorName) + '</td>' +
-        '<td>' + formatDate(e.pendingTime) + '</td>' +
+        '<td>' + escapeHtml(e.shopName || e.weightmanName || '—') + '</td>' +
+        '<td>' + formatDate(e.bookedTime) + '</td>' +
         '<td>' + formatDate(e.approvedTime) + '</td>' +
-        '<td>' + (e.distributorNotified ? '<span class="status-pill active">Yes</span>' : '<span class="status-pill pending">No</span>') + '</td>' +
+        '<td class="actions-cell"><button class="btn btn-warning btn-sm set-loading-single-btn" data-id="' + id + '"><i class="fa-solid fa-truck-loading"></i> Loading</button></td>' +
       '</tr>';
     }).join('');
   };
 
-  const handleSendToDistributor = async () => {
-    if (approvedSelected.size === 0) { toast('Select entries first', 'warning'); return; }
+  const handleSetLoadingSingle = async (entryId) => {
     try {
       setLoading(true);
-      await callAppsScript('sendToDistributor', { entryIds: [...approvedSelected] });
-      toast('Sent to Distributor', 'success');
+      await callAppsScript('advancePipelineStage', { entryId: entryId });
+      toast('Moved to Loading', 'success');
+      await loadApprovedList();
+    } catch (err) { toast('Failed: ' + err.message, 'error'); }
+    finally { setLoading(false); }
+  };
+
+  // Point 5/6: Send to Distributor with two-message SMS logic
+  const handleSendToDistributor = async () => {
+    if (approvedSelected.size === 0) { toast('Select entries first', 'warning'); return; }
+    const notifyPending = $('#notifyPendingCheckbox') ? $('#notifyPendingCheckbox').checked : false;
+    try {
+      setLoading(true);
+      const res = await callAppsScript('sendToDistributor', {
+        entryIds: [...approvedSelected],
+        notifyPending: notifyPending
+      });
+
+      // Entries stay in Approved but are now visible to the Distributor.
+      // Optional: notify remaining pending drivers with the selected plate list (one SMS each)
+      if (notifyPending && res.pendingPhones && res.pendingPhones.length) {
+        const plateList = res.pendingPlateList || '';
+        const pendingMsg = 'لوڈنگ کے لیے یہ نمبر پلیٹس منتخب کی گئی ہیں: ' + plateList + '۔ براہ کرم انتظار کریں۔';
+        res.pendingPhones.forEach(phone => {
+          sendSmsToDriver(phone, pendingMsg);
+        });
+      }
+
+      toast('Sent ' + (res.count || 0) + ' entries to Distributor' + (notifyPending ? ', notified ' + (res.pendingNotified || 0) + ' pending drivers' : ''), 'success');
       approvedSelected.clear();
       await loadApprovedList();
     } catch (err) { toast('Failed: ' + err.message, 'error'); }
     finally { setLoading(false); }
   };
 
+  // ===================== PIPELINE: Loading (Transit button moves forward) =====================
   const loadLoadingQueue = async () => {
     try {
-      const res = await callAppsScript('getApprovedList', {});
-      const entries = (res && (res.data || res.entries)) || [];
-      const notified = entries.filter(e => e.distributorNotified);
+      const res = await callAppsScript('getPipeline', { stageFilter: 'Loading' });
+      let entries = (res && (res.data || res.entries)) || [];
+      entries.sort((a, b) => new Date(a.loadingTime || 0) - new Date(b.loadingTime || 0));
       const tbody = $('#loadingTbody');
-      if (!notified.length) { tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No entries in loading queue</td></tr>'; return; }
-      tbody.innerHTML = notified.map((e, idx) => {
+      if (!entries.length) { tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No entries in loading queue</td></tr>'; return; }
+      tbody.innerHTML = entries.map((e, idx) => {
         const id = escapeHtml(e.entryId);
         return '<tr>' +
           '<td><strong>' + (idx + 1) + '</strong></td>' +
           '<td><strong>' + escapeHtml(e.truckPlate) + '</strong></td>' +
           '<td>' + escapeHtml(e.driverName) + '</td>' +
           '<td>' + escapeHtml(e.phoneNumber) + '</td>' +
-          '<td>' + escapeHtml(e.operatorName) + '</td>' +
-          '<td>' + formatDate(e.pendingTime) + '</td>' +
+          '<td>' + escapeHtml(e.shopName || e.weightmanName || '—') + '</td>' +
+          '<td>' + formatDate(e.bookedTime) + '</td>' +
           '<td>' + formatDate(e.approvedTime) + '</td>' +
-          '<td>—</td>' +
-          '<td class="actions-cell"><button class="btn btn-warning btn-sm set-loading-btn" data-id="' + id + '"><i class="fa-solid fa-truck-loading"></i> Set Loading</button></td>' +
+          '<td>' + formatDate(e.loadingTime) + '</td>' +
+          '<td class="actions-cell"><button class="btn btn-primary btn-sm advance-stage-btn" data-id="' + id + '"><i class="fa-solid fa-truck-moving"></i> Transit</button></td>' +
         '</tr>';
       }).join('');
     } catch (err) { toast('Load failed: ' + err.message, 'error'); }
   };
 
+  // ===================== PIPELINE: Transit (Deliver button moves forward) =====================
   const loadTransitList = async () => {
     try {
-      const res = await callAppsScript('getWeightEntries', { statusFilter: 'Transit' });
-      const entries = (res && (res.data || res.entries)) || [];
+      const res = await callAppsScript('getPipeline', { stageFilter: 'Transit' });
+      let entries = (res && (res.data || res.entries)) || [];
+      entries.sort((a, b) => new Date(a.transitTime || 0) - new Date(b.transitTime || 0));
       const tbody = $('#transitTbody');
       if (!entries.length) { tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No entries in transit</td></tr>'; return; }
       tbody.innerHTML = entries.map(e => {
-        const id = escapeHtml(e.EntryID);
+        const id = escapeHtml(e.entryId);
         return '<tr>' +
-          '<td><strong>' + escapeHtml(e.TruckPlate) + '</strong></td>' +
-          '<td>' + escapeHtml(e.DriverName) + '</td>' +
-          '<td>' + escapeHtml(e.PhoneNumber) + '</td>' +
-          '<td>' + escapeHtml(e.OperatorName) + '</td>' +
-          '<td>' + formatDate(e.PendingTime) + '</td>' +
-          '<td>' + formatDate(e.ApprovedTime) + '</td>' +
-          '<td>' + formatDate(e.LoadingTime) + '</td>' +
-          '<td>' + formatDate(e.TransitTime) + '</td>' +
-          '<td class="actions-cell"><button class="btn btn-success btn-sm set-delivered-btn" data-id="' + id + '"><i class="fa-solid fa-flag-checkered"></i> Delivered</button></td>' +
+          '<td><strong>' + escapeHtml(e.truckPlate) + '</strong></td>' +
+          '<td>' + escapeHtml(e.driverName) + '</td>' +
+          '<td>' + escapeHtml(e.phoneNumber) + '</td>' +
+          '<td>' + escapeHtml(e.shopName || e.weightmanName || '—') + '</td>' +
+          '<td>' + formatDate(e.bookedTime) + '</td>' +
+          '<td>' + formatDate(e.approvedTime) + '</td>' +
+          '<td>' + formatDate(e.loadingTime) + '</td>' +
+          '<td>' + formatDate(e.transitTime) + '</td>' +
+          '<td class="actions-cell"><button class="btn btn-success btn-sm advance-stage-btn" data-id="' + id + '"><i class="fa-solid fa-flag-checkered"></i> Delivered</button></td>' +
         '</tr>';
       }).join('');
     } catch (err) { toast('Load failed: ' + err.message, 'error'); }
   };
 
-  const loadDeliveredList = async () => {
+  // Shared handler for Loading->Transit and Transit->Delivered buttons (point 3)
+  const handleAdvanceStage = async (entryId, fromView) => {
     try {
-      const res = await callAppsScript('getWeightEntries', { statusFilter: 'Delivered' });
-      const entries = (res && (res.data || res.entries)) || [];
+      setLoading(true);
+      const res = await callAppsScript('advancePipelineStage', { entryId: entryId });
+      toast('Moved to ' + (res.newStage || 'next stage'), 'success');
+      if (fromView === 'loading') await loadLoadingQueue();
+      if (fromView === 'transit') await loadTransitList();
+    } catch (err) { toast('Failed: ' + err.message, 'error'); }
+    finally { setLoading(false); }
+  };
+
+  // ===================== PIPELINE: Delivered / Record Room =====================
+  const ensureDeliveredTableHeaders = () => {
+    const headRow = document.querySelector('#deliveredTbody').closest('table').querySelector('thead tr');
+    if (!headRow || headRow.dataset.extended) return;
+    const actionsTh = document.createElement('th');
+    actionsTh.textContent = 'Actions';
+    headRow.appendChild(actionsTh);
+    headRow.dataset.extended = 'true';
+  };
+
+  const loadDeliveredList = async () => {
+    ensureDeliveredTableHeaders();
+    try {
+      const res = await callAppsScript('getPipeline', { stageFilter: 'Delivered' });
+      let entries = (res && (res.data || res.entries)) || [];
+      entries.sort((a, b) => new Date(b.deliveredTime || 0) - new Date(a.deliveredTime || 0));
       const tbody = $('#deliveredTbody');
-      if (!entries.length) { tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No delivered entries</td></tr>'; return; }
+      if (!entries.length) { tbody.innerHTML = '<tr><td colspan="10" class="empty-state">No delivered entries</td></tr>'; return; }
       tbody.innerHTML = entries.map(e => {
+        const id = escapeHtml(e.entryId);
         return '<tr>' +
-          '<td><strong>' + escapeHtml(e.TruckPlate) + '</strong></td>' +
-          '<td>' + escapeHtml(e.DriverName) + '</td>' +
-          '<td>' + escapeHtml(e.PhoneNumber) + '</td>' +
-          '<td>' + escapeHtml(e.OperatorName) + '</td>' +
-          '<td>' + formatDate(e.PendingTime) + '</td>' +
-          '<td>' + formatDate(e.ApprovedTime) + '</td>' +
-          '<td>' + formatDate(e.LoadingTime) + '</td>' +
-          '<td>' + formatDate(e.TransitTime) + '</td>' +
-          '<td>' + formatDate(e.DeliveredTime) + '</td>' +
+          '<td><strong>' + escapeHtml(e.truckPlate) + '</strong></td>' +
+          '<td>' + escapeHtml(e.driverName) + '</td>' +
+          '<td>' + escapeHtml(e.phoneNumber) + '</td>' +
+          '<td>' + escapeHtml(e.shopName || e.weightmanName || '—') + '</td>' +
+          '<td>' + formatDate(e.bookedTime) + '</td>' +
+          '<td>' + formatDate(e.approvedTime) + '</td>' +
+          '<td>' + formatDate(e.loadingTime) + '</td>' +
+          '<td>' + formatDate(e.transitTime) + '</td>' +
+          '<td>' + formatDate(e.deliveredTime) + '</td>' +
+          '<td class="actions-cell"><button class="btn-icon danger delete-delivered-btn" data-id="' + id + '" title="Delete entry"><i class="fa-solid fa-trash"></i></button></td>' +
         '</tr>';
       }).join('');
     } catch (err) { toast('Load failed: ' + err.message, 'error'); }
+  };
+
+  const handleDeleteDeliveredEntry = async (entryId) => {
+    if (!confirm('Delete this delivered entry permanently?')) return;
+    try {
+      setLoading(true);
+      await callAppsScript('deletePipelineEntries', { entryIds: [entryId] });
+      toast('Entry deleted', 'success');
+      await loadDeliveredList();
+    } catch (err) { toast('Failed: ' + err.message, 'error'); }
+    finally { setLoading(false); }
+  };
+
+  // Point 4/6: Record Room - permanent log of all delivered entries with full timeline
+  const loadRecordRoom = async () => {
+    injectRecordRoomUI();
+    try {
+      const res = await callAppsScript('getPipeline', { stageFilter: 'Delivered' });
+      let entries = (res && (res.data || res.entries)) || [];
+      entries.sort((a, b) => new Date(b.deliveredTime || 0) - new Date(a.deliveredTime || 0));
+      const tbody = $('#recordRoomTbody');
+      if (!tbody) return;
+      if (!entries.length) { tbody.innerHTML = '<tr><td colspan="10" class="empty-state">No completed records yet</td></tr>'; return; }
+      tbody.innerHTML = entries.map(e => {
+        return '<tr>' +
+          '<td><strong>' + escapeHtml(e.truckPlate) + '</strong></td>' +
+          '<td>' + escapeHtml(e.driverName) + '</td>' +
+          '<td>' + escapeHtml(e.phoneNumber) + '</td>' +
+          '<td>' + escapeHtml(e.shopName || e.weightmanName || '—') + '</td>' +
+          '<td>' + escapeHtml(e.bookingFee || '—') + '</td>' +
+          '<td>' + formatDate(e.bookedTime) + '</td>' +
+          '<td>' + formatDate(e.approvedTime) + '</td>' +
+          '<td>' + formatDate(e.loadingTime) + '</td>' +
+          '<td>' + formatDate(e.transitTime) + '</td>' +
+          '<td>' + formatDate(e.deliveredTime) + '</td>' +
+        '</tr>';
+      }).join('');
+    } catch (err) { toast('Load failed: ' + err.message, 'error'); }
+  };
+
+  // Inject "Notify pending drivers" checkbox next to Send to Distributor button (point 5)
+  const injectNotifyPendingCheckbox = () => {
+    const btn = $('#sendToDistBtn');
+    if (!btn || $('#notifyPendingCheckbox')) return;
+    const wrapper = document.createElement('label');
+    wrapper.style.cssText = 'display:inline-flex;align-items:center;gap:6px;margin-right:12px;font-size:13px;cursor:pointer;';
+    wrapper.innerHTML = '<input type="checkbox" id="notifyPendingCheckbox" /> Notify pending drivers (share plate list)';
+    btn.parentNode.insertBefore(wrapper, btn);
+  };
+
+  // Inject Record Room nav item + view container (no HTML file edit needed)
+  const injectRecordRoomUI = () => {
+    if ($('#recordView')) return;
+
+    const nav = document.querySelector('#adminScreen .sidebar-nav');
+    if (nav && !document.querySelector('[data-view="record"]')) {
+      const navItem = document.createElement('a');
+      navItem.href = '#';
+      navItem.className = 'nav-item';
+      navItem.dataset.view = 'record';
+      navItem.innerHTML = '<i class="fa-solid fa-box-archive"></i><span>Record Room</span>';
+      nav.appendChild(navItem);
+      navItem.addEventListener('click', (e) => {
+        e.preventDefault();
+        switchAdminView('record');
+      });
+    }
+
+    const main = document.querySelector('#adminScreen .main-content');
+    if (main) {
+      const view = document.createElement('div');
+      view.id = 'recordView';
+      view.className = 'view';
+      view.innerHTML =
+        '<div class="view-header"><div><h3>Record Room</h3><p class="muted">Complete history of fully delivered shipments with full timeline</p></div></div>' +
+        '<div class="table-wrapper">' +
+          '<table class="data-table">' +
+            '<thead><tr><th>Plate</th><th>Driver</th><th>Phone</th><th>Shop</th><th>Fee</th><th>Booked</th><th>Approved</th><th>Loading</th><th>Transit</th><th>Delivered</th></tr></thead>' +
+            '<tbody id="recordRoomTbody"><tr><td colspan="10" class="empty-state">Loading...</td></tr></tbody>' +
+          '</table>' +
+        '</div>';
+      main.appendChild(view);
+    }
+  };
+
+  // Point 2: Admin sees and fulfills Distributor's "Request Admin to Send" requests
+  const injectDistRequestsUI = () => {
+    if ($('#distRequestsView')) return;
+
+    const nav = document.querySelector('#adminScreen .sidebar-nav');
+    if (nav && !document.querySelector('[data-view="distRequests"]')) {
+      const navItem = document.createElement('a');
+      navItem.href = '#';
+      navItem.className = 'nav-item';
+      navItem.dataset.view = 'distRequests';
+      navItem.innerHTML = '<i class="fa-solid fa-bell"></i><span>Distributor Requests</span>';
+      nav.appendChild(navItem);
+      navItem.addEventListener('click', (e) => {
+        e.preventDefault();
+        switchAdminView('distRequests');
+      });
+    }
+
+    const main = document.querySelector('#adminScreen .main-content');
+    if (main) {
+      const view = document.createElement('div');
+      view.id = 'distRequestsView';
+      view.className = 'view';
+      view.innerHTML =
+        '<div class="view-header"><div><h3>Distributor Requests</h3><p class="muted">Requests from Distributor to send loading SMS and move entries to Loading</p></div></div>' +
+        '<div class="table-wrapper">' +
+          '<table class="data-table">' +
+            '<thead><tr><th>Requested By</th><th>Plates</th><th>Requested Time</th><th>Actions</th></tr></thead>' +
+            '<tbody id="distRequestsTbody"><tr><td colspan="4" class="empty-state">Loading...</td></tr></tbody>' +
+          '</table>' +
+        '</div>';
+      main.appendChild(view);
+    }
+  };
+
+  const loadDistRequests = async () => {
+    injectDistRequestsUI();
+    try {
+      const res = await callAppsScript('getDistributorRequests', {});
+      const requests = (res && (res.data || res.requests)) || [];
+      const tbody = $('#distRequestsTbody');
+      if (!requests.length) { tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No pending requests</td></tr>'; return; }
+
+      // Resolve plate numbers for each request's entryIds using the Approved cache
+      const approvedRes = await callAppsScript('getPipeline', { stageFilter: 'Approved' });
+      const approvedEntries = (approvedRes && (approvedRes.data || approvedRes.entries)) || [];
+      const plateMap = {};
+      approvedEntries.forEach(e => { plateMap[e.entryId] = e.truckPlate; });
+
+      tbody.innerHTML = requests.map(r => {
+        const plates = (r.entryIds || []).map(id => plateMap[id] || id).join(', ');
+        return '<tr>' +
+          '<td>' + escapeHtml(r.distributorName || '—') + '</td>' +
+          '<td>' + escapeHtml(plates) + '</td>' +
+          '<td>' + formatDate(r.requestedTime) + '</td>' +
+          '<td class="actions-cell"><button class="btn btn-success btn-sm fulfill-request-btn" data-id="' + escapeHtml(r.requestId) + '"><i class="fa-solid fa-paper-plane"></i> Send &amp; Move to Loading</button></td>' +
+        '</tr>';
+      }).join('');
+    } catch (err) { toast('Load failed: ' + err.message, 'error'); }
+  };
+
+  const handleFulfillDistRequest = async (requestId) => {
+    const msg = 'لوڈنگ کے لیے اپنی گاڑی تیار کریں۔ شکریہ۔';
+    try {
+      setLoading(true);
+      const res = await callAppsScript('fulfillDistributorRequest', { requestId: requestId, message: msg });
+      if (res.movedEntries) {
+        res.movedEntries.forEach(entry => {
+          if (entry.phoneNumber) sendSmsToDriver(entry.phoneNumber, res.loadingMessage || msg);
+        });
+      }
+      toast('Sent SMS and moved ' + (res.count || 0) + ' entries to Loading', 'success');
+      await loadDistRequests();
+    } catch (err) { toast('Failed: ' + err.message, 'error'); }
+    finally { setLoading(false); }
   };
 
   const loadGlobalEntries = async () => {
@@ -1468,6 +2059,95 @@
   // ============ PRINT ============
   const handlePrint = () => { window.print(); };
 
+  // Point 4: Print/PDF + Search toolbar injected onto every admin view
+  // (Users, Pending, Approved, Loading, Transit, Delivered, Record Room)
+  const ADMIN_PRINTABLE_VIEWS = [
+    { id: 'usersView', label: 'Users' },
+    { id: 'pendingView', label: 'Pending (Weight)' },
+    { id: 'approvedView', label: 'Approved List' },
+    { id: 'loadingView', label: 'Loading Queue' },
+    { id: 'transitView', label: 'In Transit' },
+    { id: 'deliveredView', label: 'Delivered' }
+  ];
+
+  const printSpecificTable = (viewId, title) => {
+    const view = document.getElementById(viewId);
+    if (!view) return;
+    const table = view.querySelector('table');
+    if (!table) { toast('Nothing to print on this page', 'warning'); return; }
+
+    const printWindow = window.open('', '_blank');
+    printWindow.document.write(
+      '<html><head><title>' + escapeHtml(title) + '</title>' +
+      '<style>' +
+      'body{font-family:Arial,sans-serif;padding:20px;}' +
+      'h2{margin-bottom:4px;} p{color:#666;margin-top:0;margin-bottom:16px;font-size:12px;}' +
+      'table{width:100%;border-collapse:collapse;font-size:12px;}' +
+      'th,td{border:1px solid #ccc;padding:6px 8px;text-align:left;}' +
+      'th{background:#f3f4f6;}' +
+      '.actions-cell, th:last-child, td:last-child{display:none;}' + // hide action buttons column in print
+      '</style></head><body>' +
+      '<h2>' + escapeHtml(title) + '</h2>' +
+      '<p>Printed on ' + new Date().toLocaleString() + '</p>' +
+      table.outerHTML +
+      '</body></html>'
+    );
+    printWindow.document.close();
+    printWindow.focus();
+    setTimeout(() => { printWindow.print(); }, 300);
+  };
+
+  // Injects a search box + Print/PDF button into a view's .view-header (or creates one)
+  const injectAdminViewToolbar = (viewId, title) => {
+    const view = document.getElementById(viewId);
+    if (!view || view.querySelector('.admin-toolbar-injected')) return;
+
+    let header = view.querySelector('.view-header');
+    if (!header) {
+      header = document.createElement('div');
+      header.className = 'view-header';
+      view.insertBefore(header, view.firstChild);
+    }
+    let actionsWrap = header.querySelector('.view-actions');
+    if (!actionsWrap) {
+      actionsWrap = document.createElement('div');
+      actionsWrap.className = 'view-actions';
+      header.appendChild(actionsWrap);
+    }
+
+    const toolbar = document.createElement('div');
+    toolbar.className = 'admin-toolbar-injected';
+    toolbar.style.cssText = 'display:flex;align-items:center;gap:8px;';
+    toolbar.innerHTML =
+      '<div class="search-box"><i class="fa-solid fa-magnifying-glass"></i>' +
+      '<input type="text" class="admin-search-input" placeholder="Search plate, driver, or phone..." /></div>' +
+      '<button class="btn btn-primary btn-sm admin-print-btn"><i class="fa-solid fa-print"></i> Print/PDF</button>';
+    actionsWrap.insertBefore(toolbar, actionsWrap.firstChild);
+
+    toolbar.querySelector('.admin-print-btn').addEventListener('click', () => printSpecificTable(viewId, title));
+    toolbar.querySelector('.admin-search-input').addEventListener('input', (e) => {
+      filterAdminTable(viewId, e.target.value.trim().toLowerCase());
+    });
+  };
+
+  // Generic row filter: hides table rows that don't match the query in any cell text
+  const filterAdminTable = (viewId, query) => {
+    const view = document.getElementById(viewId);
+    if (!view) return;
+    const tbody = view.querySelector('tbody');
+    if (!tbody) return;
+    const rows = tbody.querySelectorAll('tr');
+    rows.forEach(row => {
+      if (!query) { row.style.display = ''; return; }
+      const text = row.textContent.toLowerCase();
+      row.style.display = text.includes(query) ? '' : 'none';
+    });
+  };
+
+  const injectAllAdminToolbars = () => {
+    ADMIN_PRINTABLE_VIEWS.forEach(v => injectAdminViewToolbar(v.id, v.label));
+  };
+
   // ============ EVENT BINDINGS ============
   const bindEvents = () => {
     $$('.tab-btn').forEach(btn => btn.addEventListener('click', () => switchTab(btn.dataset.tab)));
@@ -1531,27 +2211,46 @@
     $('#addWeightForm').addEventListener('submit', handleAddWeightEntry);
 
     $$('#distributorScreen .nav-item').forEach(n => n.addEventListener('click', (e) => { e.preventDefault(); switchDistView(n.dataset.view); }));
-    $('#sendBulkSmsBtn').addEventListener('click', sendBulkDistSms);
     $('#distListTbody').addEventListener('change', (e) => {
       if (e.target.classList.contains('dist-check')) {
         const id = e.target.dataset.id;
         if (e.target.checked) distSelected.add(id); else distSelected.delete(id);
-        $('#sendBulkSmsBtn').disabled = distSelected.size === 0;
+        const sendBtn = $('#distSendSmsBtn');
+        const reqBtn = $('#distRequestAdminBtn');
+        if (sendBtn) sendBtn.disabled = distSelected.size === 0;
+        if (reqBtn) reqBtn.disabled = distSelected.size === 0;
       }
-    });
-    $('#distListTbody').addEventListener('click', (e) => {
-      const smsBtn = e.target.closest('.send-sms-btn');
-      if (smsBtn) sendDistSms(smsBtn.dataset.id, smsBtn.dataset.phone);
     });
 
     $$('#adminScreen .nav-item').forEach(n => n.addEventListener('click', (e) => { e.preventDefault(); switchAdminView(n.dataset.view); }));
+    injectRecordRoomUI();
+    injectDistRequestsUI();
+    injectNotifyPendingCheckbox();
+    injectAllAdminToolbars();
+    injectAdminViewToolbar('recordView', 'Record Room');
+    injectAdminViewToolbar('distRequestsView', 'Distributor Requests');
+
+    document.addEventListener('click', (e) => {
+      const fulfillBtn = e.target.closest('.fulfill-request-btn');
+      if (fulfillBtn) handleFulfillDistRequest(fulfillBtn.dataset.id);
+      const delDeliveredBtn = e.target.closest('.delete-delivered-btn');
+      if (delDeliveredBtn) handleDeleteDeliveredEntry(delDeliveredBtn.dataset.id);
+    });
+
     $('#usersTbody').addEventListener('click', (e) => {
       const approve = e.target.closest('.approve-btn');
       const disable = e.target.closest('.disable-btn');
       const userLink = e.target.closest('.user-name-link');
+      const delBtn = e.target.closest('.delete-user-btn');
       if (approve) handleUserAction(approve.dataset.id, 'approveUser');
       if (disable && confirm('Disable this user?')) handleUserAction(disable.dataset.id, 'disableUser');
       if (userLink) { e.preventDefault(); showUserDetails(userLink.dataset.uid); }
+      if (delBtn) handleDeleteUser(delBtn.dataset.id, delBtn.dataset.name);
+    });
+    $('#usersTbody').addEventListener('change', (e) => {
+      if (e.target.classList.contains('auto-approve-toggle')) {
+        handleToggleAutoApproval(e.target.dataset.id, e.target.checked);
+      }
     });
 
     $('#pendingTbody').addEventListener('change', (e) => {
@@ -1560,10 +2259,6 @@
         if (e.target.checked) pendingSelected.add(id); else pendingSelected.delete(id);
         $('#approveBulkBtn').disabled = pendingSelected.size === 0;
       }
-    });
-    $('#pendingTbody').addEventListener('click', (e) => {
-      const paidBtn = e.target.closest('.mark-paid-btn');
-      if (paidBtn) handleMarkPaid(paidBtn.dataset.id);
     });
     $('#approveBulkBtn').addEventListener('click', handleApproveBulk);
 
@@ -1574,33 +2269,20 @@
         $('#sendToDistBtn').disabled = approvedSelected.size === 0;
       }
     });
+    $('#approvedTbody').addEventListener('click', (e) => {
+      const btn = e.target.closest('.set-loading-single-btn');
+      if (btn) handleSetLoadingSingle(btn.dataset.id);
+    });
     $('#sendToDistBtn').addEventListener('click', handleSendToDistributor);
 
-    $('#loadingTbody').addEventListener('click', async (e) => {
-      const btn = e.target.closest('.set-loading-btn');
-      if (btn) {
-        try {
-          setLoading(true);
-          await callAppsScript('updateWeightEntryStatus', { entryId: btn.dataset.id, newStatus: 'Loading' });
-          toast('Set to Loading', 'success');
-          await loadLoadingQueue();
-        } catch (err) { toast('Failed: ' + err.message, 'error'); }
-        finally { setLoading(false); }
-      }
+    $('#loadingTbody').addEventListener('click', (e) => {
+      const btn = e.target.closest('.advance-stage-btn');
+      if (btn) handleAdvanceStage(btn.dataset.id, 'loading');
     });
 
-    $('#transitTbody').addEventListener('click', async (e) => {
-      const btn = e.target.closest('.set-delivered-btn');
-      if (btn) {
-        try {
-          setLoading(true);
-          await callAppsScript('updateWeightEntryStatus', { entryId: btn.dataset.id, newStatus: 'Delivered' });
-          toast('Set to Delivered', 'success');
-          await loadTransitList();
-          await loadDeliveredList();
-        } catch (err) { toast('Failed: ' + err.message, 'error'); }
-        finally { setLoading(false); }
-      }
+    $('#transitTbody').addEventListener('click', (e) => {
+      const btn = e.target.closest('.advance-stage-btn');
+      if (btn) handleAdvanceStage(btn.dataset.id, 'transit');
     });
 
     $('#menuToggle').addEventListener('click', () => $('#dashboardScreen .sidebar').classList.toggle('open'));
@@ -1656,8 +2338,7 @@
 
   const init = () => {
     bindEvents();
-    showScreen('auth');
-    setLoading(false);
+    restoreSession();
   };
 
   if (document.readyState === 'loading') {
