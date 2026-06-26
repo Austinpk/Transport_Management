@@ -6,8 +6,20 @@
   'use strict';
 
   // Inject date-group header styling (kept here so no separate CSS file edit is needed)
+  // Load Noto Nastaliq Urdu webfont for beautiful Urdu rendering in lists & forms
+  const __urduFontLink = document.createElement('link');
+  __urduFontLink.rel = 'stylesheet';
+  __urduFontLink.href = 'https://fonts.googleapis.com/css2?family=Noto+Nastaliq+Urdu:wght@400;500;700&display=swap';
+  document.head.appendChild(__urduFontLink);
+
   const __dateHeaderStyle = document.createElement('style');
   __dateHeaderStyle.textContent = `
+    /* Urdu text in tables/cells gets Nastaliq automatically via :lang or .urdu class */
+    .urdu, [lang="ur"] {
+      font-family: "Noto Nastaliq Urdu", "Jameel Noori Nastaleeq", serif;
+      font-size: 1.05em;
+      line-height: 2.1;
+    }
     tr.date-group-header td {
       background: #eef2ff;
       color: #1e3a8a;
@@ -172,6 +184,41 @@
     const div = document.createElement('div');
     div.textContent = String(str);
     return div.innerHTML;
+  };
+
+  // Ensures a phone number is shown with its leading 0 (Pakistani mobiles: 03XXXXXXXXX).
+  // Fixes display for any old records saved without the leading zero.
+  const displayPhone = (raw) => {
+    if (raw === null || raw === undefined || raw === '') return '—';
+    let digits = String(raw).replace(/[^\d]/g, '');
+    if (!digits) return String(raw);
+    if (digits.indexOf('92') === 0 && digits.length > 10) digits = digits.substring(2); // strip 92 country code
+    if (digits.indexOf('0') !== 0) digits = '0' + digits; // add leading zero if missing
+    return digits;
+  };
+
+  // Wraps text in a span with the Urdu Nastaliq font IF it contains Arabic-script characters.
+  // Safe for English text (returns it escaped, unchanged styling).
+  const URDU_RE = /[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]/;
+  const urduWrap = (text) => {
+    const s = (text === null || text === undefined) ? '' : String(text);
+    if (!s) return '—';
+    if (URDU_RE.test(s)) return '<span class="urdu">' + escapeHtml(s) + '</span>';
+    return escapeHtml(s);
+  };
+
+  // Renders CNIC + Reference as small sub-text under a driver name (only if present).
+  const cnicRefSub = (cnic, reference) => {
+    const bits = [];
+    if (cnic) bits.push('<span style="color:#6b7280;">CNIC: ' + escapeHtml(String(cnic)) + '</span>');
+    if (reference) {
+      const ref = URDU_RE.test(String(reference))
+        ? '<span class="urdu">' + escapeHtml(String(reference)) + '</span>'
+        : escapeHtml(String(reference));
+      bits.push('<span style="color:#6b7280;">حوالہ: ' + ref + '</span>');
+    }
+    if (!bits.length) return '';
+    return '<div style="font-size:11px;margin-top:2px;line-height:1.5;">' + bits.join('<br>') + '</div>';
   };
 
   const formatDate = (d) => {
@@ -605,8 +652,22 @@
       allEntriesCache = (res && (res.data || res.entries)) || [];
       renderEntries(allEntriesCache);
       renderStats(allEntriesCache);
+      refreshAutocompleteCache(); // keep the autocomplete source up to date (all dates)
     } catch (err) { toast('Load failed: ' + err.message, 'error'); }
   };
+
+  // Separate cache holding ALL entries (every date) purely for plate autocomplete,
+  // so suggestions work even when the visible list is filtered to "Today".
+  let autocompleteCache = [];
+  const refreshAutocompleteCache = async () => {
+    try {
+      const res = await callAppsScript('getEntries', { dateFilter: 'all' });
+      autocompleteCache = (res && (res.data || res.entries)) || [];
+    } catch (err) { /* silent - autocomplete just falls back to allEntriesCache */ }
+  };
+
+  // Source used by autocomplete: prefer the full cache, fall back to the visible cache.
+  const getAutocompleteSource = () => (autocompleteCache.length ? autocompleteCache : allEntriesCache);
 
   const renderStats = (entries) => {
     $('#statTotal').textContent = entries.length;
@@ -657,15 +718,15 @@
 
       const id = escapeHtml(e.EntryID || '');
       const plate = escapeHtml(e.TruckPlate || '—');
-      const driver = escapeHtml(e.DriverName || '—');
-      const phone = escapeHtml(e.PhoneNumber || '—');
+      const driver = urduWrap(e.DriverName) + cnicRefSub(e.CNIC, e.Reference);
+      const phone = displayPhone(e.PhoneNumber);
       const address = escapeHtml(e.Address || '—');
       const status = escapeHtml(e.Status || 'Pending');
       const booked = formatDate(e.PendingTime || e.Timestamp);
       const transit = formatDate(e.TransitTime);
       const delivered = formatDate(e.DeliveredTime);
-      const phoneLink = e.PhoneNumber ? '<a href="tel:' + escapeHtml(e.PhoneNumber) + '" class="phone-link" title="Call"><i class="fa-solid fa-phone"></i></a>' : '';
-      const smsLink = e.PhoneNumber ? '<a href="sms:' + escapeHtml(e.PhoneNumber) + '" class="btn-icon phone" title="SMS"><i class="fa-solid fa-message"></i></a>' : '';
+      const phoneLink = e.PhoneNumber ? '<a href="tel:' + displayPhone(e.PhoneNumber) + '" class="phone-link" title="Call"><i class="fa-solid fa-phone"></i></a>' : '';
+      const smsLink = e.PhoneNumber ? '<a href="sms:' + displayPhone(e.PhoneNumber) + '" class="btn-icon phone" title="SMS"><i class="fa-solid fa-message"></i></a>' : '';
 
       html += '<tr data-id="' + id + '">' +
         '<td><input type="checkbox" class="row-check" data-id="' + id + '" /></td>' +
@@ -681,7 +742,7 @@
         '<td>' + booked + '</td>' +
         '<td>' + transit + '</td>' +
         '<td>' + delivered + '</td>' +
-        '<td class="actions-cell"><button class="btn-icon danger delete-btn" data-id="' + id + '" title="Delete"><i class="fa-solid fa-trash"></i></button></td>' +
+        '<td class="actions-cell"><button class="btn-icon edit-entry-btn" data-id="' + id + '" data-type="operator" title="Edit"><i class="fa-solid fa-pen"></i></button> <button class="btn-icon danger delete-btn" data-id="' + id + '" title="Delete"><i class="fa-solid fa-trash"></i></button></td>' +
       '</tr>';
     });
 
@@ -752,8 +813,8 @@
   // ===== sendSmsToDriver: opens SMS app with pre-filled message =====
   const sendSmsToDriver = (phone, message) => {
     if (!phone) return;
-    // Clean phone number - remove spaces/dashes
-    const cleanPhone = String(phone).replace(/[\s\-]/g, '');
+    // Normalize to 0-prefixed form, then strip spaces/dashes
+    const cleanPhone = displayPhone(phone).replace(/[\s\-]/g, '');
     try {
       // Try sms: link first (works on mobile and some desktops)
       const smsLink = document.createElement('a');
@@ -792,7 +853,7 @@
         'data-phone="' + escapeHtml(m.PhoneNumber || '') + '" ' +
         'data-address="' + escapeHtml(m.Address || '') + '">' +
           '<strong>' + escapeHtml(m.TruckPlate) + '</strong>' +
-          '<span> — ' + escapeHtml(m.DriverName || 'Unknown driver') + (m.PhoneNumber ? ' · ' + escapeHtml(m.PhoneNumber) : '') + '</span>' +
+          '<span> — ' + urduWrap(m.DriverName || 'Unknown driver') + (m.PhoneNumber ? ' · ' + escapeHtml(m.PhoneNumber) : '') + '</span>' +
         '</div>'
       ).join('');
       suggestBox.style.display = 'block';
@@ -805,7 +866,7 @@
       // Find matching plates, most recent first, deduplicated by plate
       const seen = new Set();
       const matches = [];
-      const sorted = [...allEntriesCache].sort((a, b) => {
+      const sorted = [...getAutocompleteSource()].sort((a, b) => {
         const da = new Date(a.PendingTime || a.Timestamp || 0).getTime();
         const db = new Date(b.PendingTime || b.Timestamp || 0).getTime();
         return db - da;
@@ -843,7 +904,197 @@
     });
   };
 
-  // ===================== ADD OLD (BACKDATED) ENTRIES =====================
+  // Generic plate autocomplete: works for any set of field IDs (used by the backdated modal).
+  const setupGenericPlateAutocomplete = (plateId, suggestId, driverId, phoneId, addressId) => {
+    const plateInput = document.getElementById(plateId);
+    const suggestBox = document.getElementById(suggestId);
+    if (!plateInput || !suggestBox || plateInput.dataset.acReady) return;
+    plateInput.dataset.acReady = '1';
+
+    const hide = () => { suggestBox.innerHTML = ''; suggestBox.style.display = 'none'; };
+
+    plateInput.addEventListener('input', () => {
+      const query = plateInput.value.trim().toLowerCase();
+      if (query.length < 2) { hide(); return; }
+      const seen = new Set();
+      const matches = [];
+      const sorted = [...getAutocompleteSource()].sort((a, b) => {
+        const da = new Date(a.PendingTime || a.Timestamp || 0).getTime();
+        const db = new Date(b.PendingTime || b.Timestamp || 0).getTime();
+        return db - da;
+      });
+      for (const entry of sorted) {
+        const plate = String(entry.TruckPlate || '');
+        const pl = plate.toLowerCase();
+        if (pl.includes(query) && !seen.has(pl)) {
+          seen.add(pl);
+          matches.push(entry);
+          if (matches.length >= 6) break;
+        }
+      }
+      if (!matches.length) { hide(); return; }
+      suggestBox.innerHTML = matches.map(m =>
+        '<div class="suggestion-item" data-plate="' + escapeHtml(m.TruckPlate) + '" ' +
+        'data-driver="' + escapeHtml(m.DriverName || '') + '" ' +
+        'data-phone="' + escapeHtml(m.PhoneNumber || '') + '" ' +
+        'data-address="' + escapeHtml(m.Address || '') + '">' +
+          '<strong>' + escapeHtml(m.TruckPlate) + '</strong>' +
+          '<span> — ' + urduWrap(m.DriverName || 'Unknown driver') + (m.PhoneNumber ? ' · ' + displayPhone(m.PhoneNumber) : '') + '</span>' +
+        '</div>'
+      ).join('');
+      suggestBox.style.display = 'block';
+    });
+
+    suggestBox.addEventListener('click', (e) => {
+      const item = e.target.closest('.suggestion-item');
+      if (!item) return;
+      plateInput.value = item.dataset.plate || '';
+      if (driverId) document.getElementById(driverId).value = item.dataset.driver || '';
+      if (phoneId) document.getElementById(phoneId).value = displayPhone(item.dataset.phone || '').replace('—', '');
+      if (addressId && document.getElementById(addressId)) document.getElementById(addressId).value = item.dataset.address || '';
+      hide();
+      if (driverId) document.getElementById(driverId).focus();
+    });
+
+    document.addEventListener('click', (e) => {
+      if (!suggestBox.contains(e.target) && e.target !== plateInput) hide();
+    });
+    plateInput.addEventListener('keydown', (e) => { if (e.key === 'Escape') hide(); });
+  };
+
+
+  // ===================== EDIT ENTRY (Operator + Pipeline) =====================
+  let _editContext = { entryId: null, type: null }; // type: 'operator' | 'pipeline'
+
+  const injectEditModal = () => {
+    if (document.getElementById('editEntryModal')) return;
+    const modal = document.createElement('div');
+    modal.id = 'editEntryModal';
+    modal.className = 'modal-overlay';
+    modal.style.display = 'none';
+    modal.innerHTML =
+      '<div class="modal-box" style="max-width:560px;width:95%;">' +
+        '<div class="modal-header">' +
+          '<h3><i class="fa-solid fa-pen"></i> Edit Entry</h3>' +
+          '<button class="modal-close" id="closeEditModal">&times;</button>' +
+        '</div>' +
+        '<div class="modal-body">' +
+          '<div class="grid-2">' +
+            '<div class="form-group"><label for="edPlate">Truck Plate *</label><input type="text" id="edPlate" /></div>' +
+            '<div class="form-group"><label for="edDriver">Driver Name *</label><input type="text" id="edDriver" /></div>' +
+            '<div class="form-group"><label for="edPhone">Phone *</label><input type="tel" id="edPhone" /></div>' +
+            '<div class="form-group"><label for="edAddress">Address</label><input type="text" id="edAddress" /></div>' +
+            '<div class="form-group"><label for="edFee">Booking Fee</label><input type="text" id="edFee" /></div>' +
+            '<div class="form-group"><label for="edCnic">CNIC</label><input type="text" id="edCnic" /></div>' +
+            '<div class="form-group"><label for="edReference">حوالہ / Reference</label><input type="text" id="edReference" /></div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="form-actions" style="padding:14px 20px;">' +
+          '<button type="button" class="btn btn-ghost" id="cancelEditBtn">Cancel</button>' +
+          '<button type="button" class="btn btn-primary" id="saveEditBtn"><i class="fa-solid fa-save"></i> Save Changes</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(modal);
+    document.getElementById('closeEditModal').addEventListener('click', closeEditModal);
+    document.getElementById('cancelEditBtn').addEventListener('click', closeEditModal);
+    document.getElementById('saveEditBtn').addEventListener('click', saveEditEntry);
+  };
+
+  const closeEditModal = () => {
+    const m = document.getElementById('editEntryModal');
+    if (m) m.style.display = 'none';
+    _editContext = { entryId: null, type: null };
+  };
+
+  // Opens the edit modal pre-filled. `type` is 'operator' or 'pipeline'.
+  const openEditModal = (entryId, type) => {
+    injectEditModal();
+    let entry = null;
+    if (type === 'operator') {
+      entry = getAutocompleteSource().find(e => String(e.EntryID) === String(entryId))
+           || allEntriesCache.find(e => String(e.EntryID) === String(entryId));
+      if (entry) {
+        $('#edPlate').value = entry.TruckPlate || '';
+        $('#edDriver').value = entry.DriverName || '';
+        $('#edPhone').value = displayPhone(entry.PhoneNumber).replace('—', '');
+        $('#edAddress').value = entry.Address || '';
+        $('#edFee').value = entry.BookingFee || '';
+        $('#edCnic').value = entry.CNIC || '';
+        $('#edReference').value = entry.Reference || '';
+      }
+    } else {
+      entry = _pipelineEditCache.find(e => String(e.entryId) === String(entryId));
+      if (entry) {
+        $('#edPlate').value = entry.truckPlate || '';
+        $('#edDriver').value = entry.driverName || '';
+        $('#edPhone').value = displayPhone(entry.phoneNumber).replace('—', '');
+        $('#edAddress').value = entry.address || '';
+        $('#edFee').value = entry.bookingFee || '';
+        $('#edCnic').value = entry.cnic || '';
+        $('#edReference').value = entry.reference || '';
+      }
+    }
+    if (!entry) { toast('Could not load entry to edit', 'error'); return; }
+    _editContext = { entryId: entryId, type: type };
+    document.getElementById('editEntryModal').style.display = 'flex';
+  };
+
+  const saveEditEntry = async () => {
+    if (!_editContext.entryId) return;
+    const plate = $('#edPlate').value.trim();
+    const driver = $('#edDriver').value.trim();
+    const phone = $('#edPhone').value.trim();
+    if (!plate || !driver || !phone) { toast('Plate, driver and phone are required', 'warning'); return; }
+
+    const payload = {
+      entryId: _editContext.entryId,
+      truckPlate: plate,
+      driverName: driver,
+      phoneNumber: phone,
+      address: $('#edAddress').value.trim(),
+      bookingFee: $('#edFee').value.trim(),
+      cnic: $('#edCnic').value.trim(),
+      reference: $('#edReference').value.trim()
+    };
+    const action = _editContext.type === 'operator' ? 'editEntry' : 'editPipelineEntry';
+
+    try {
+      setLoading(true);
+      const res = await callAppsScript(action, payload);
+      if (res && res.success === false) {
+        if (res.error && res.error.indexOf('BLACKLISTED:') === 0) {
+          toast('Cannot save: plate is blacklisted (' + res.error.split('BLACKLISTED:')[1] + ')', 'error');
+        } else {
+          toast('Failed: ' + (res.error || 'unknown'), 'error');
+        }
+        return;
+      }
+      toast('Entry updated', 'success');
+      closeEditModal();
+      // Refresh whatever is on screen
+      if (_editContext.type === 'operator') {
+        await loadOperatorData();
+      } else if (typeof _activeRefreshFn === 'function') {
+        _activeRefreshFn();
+      }
+    } catch (err) {
+      toast('Failed: ' + err.message, 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Cache of the most recently rendered pipeline entries, so edit can pre-fill from them.
+  let _pipelineEditCache = [];
+  const cachePipelineEntries = (entries) => {
+    // Merge by entryId so entries from different stage views accumulate
+    const byId = {};
+    _pipelineEditCache.forEach(e => { byId[e.entryId] = e; });
+    (entries || []).forEach(e => { byId[e.entryId] = e; });
+    _pipelineEditCache = Object.keys(byId).map(k => byId[k]);
+  };
+
+
   let backdatedBatch = []; // { truckPlate, driverName, phoneNumber, address, bookingFee, status }
 
   const injectBackdatedUI = () => {
@@ -878,7 +1129,7 @@
             <input type="datetime-local" id="bdDateTime" />
           </div>
           <div class="grid-2" style="margin-top:10px;">
-            <div class="form-group"><label for="bdPlate">Truck Number Plate *</label><input type="text" id="bdPlate" placeholder="ABC-1234" autocomplete="off" /></div>
+            <div class="form-group"><label for="bdPlate">Truck Number Plate *</label><input type="text" id="bdPlate" placeholder="ABC-1234" autocomplete="off" /><div class="suggestions" id="bdPlateSuggestions"></div></div>
             <div class="form-group"><label for="bdDriver">Driver Name *</label><input type="text" id="bdDriver" placeholder="Driver full name" /></div>
             <div class="form-group"><label for="bdPhone">Phone Number *</label><input type="tel" id="bdPhone" placeholder="+923001234567" /></div>
             <div class="form-group"><label for="bdAddress">Address (Optional)</label><input type="text" id="bdAddress" placeholder="Pickup/Drop location" /></div>
@@ -941,6 +1192,7 @@
     $('#bdFee').value = '';
     $('#bdStatus').value = 'Pending';
     $('#backdatedModal').style.display = 'flex';
+    setupGenericPlateAutocomplete('bdPlate', 'bdPlateSuggestions', 'bdDriver', 'bdPhone', 'bdAddress');
   };
 
   const closeBackdatedModal = () => {
@@ -983,8 +1235,8 @@
     tbody.innerHTML = backdatedBatch.map((b, idx) =>
       '<tr>' +
         '<td><strong>' + escapeHtml(b.truckPlate) + '</strong></td>' +
-        '<td>' + escapeHtml(b.driverName) + '</td>' +
-        '<td>' + escapeHtml(b.phoneNumber) + '</td>' +
+        '<td>' + urduWrap(b.driverName) + '</td>' +
+        '<td>' + displayPhone(b.phoneNumber) + '</td>' +
         '<td>' + escapeHtml(b.status) + '</td>' +
         '<td>' + escapeHtml(b.bookingFee || '—') + '</td>' +
         '<td><button type="button" class="btn-icon danger remove-batch-item" data-idx="' + idx + '" title="Remove"><i class="fa-solid fa-trash"></i></button></td>' +
@@ -1042,6 +1294,8 @@
       phoneNumber: $('#phoneNumber').value.trim(),
       address: $('#address').value.trim(),
       bookingFee: $('#bookingFee').value.trim(),
+      cnic: $('#cnic') ? $('#cnic').value.trim() : '',
+      reference: $('#reference') ? $('#reference').value.trim() : '',
       sendSms: $('#sendSms').checked
     };
     if (!data.truckPlate || !data.driverName || !data.phoneNumber) {
@@ -1094,6 +1348,7 @@
   };
 
   const renderWeightEntries = (entries) => {
+    cachePipelineEntries(entries);
     const tbody = $('#weightEntriesTbody');
     if (!entries.length) {
       tbody.innerHTML = '<tr><td colspan="10" class="empty-state">No entries yet</td></tr>';
@@ -1102,10 +1357,12 @@
     // Header is: Plate, Driver, Phone, Status, Pending, Paid(repurposed=Auto), Approved, Loading, Transit, Delivered
     tbody.innerHTML = entries.map(e => {
       const stage = escapeHtml(e.stage || 'Pending');
+      const id = escapeHtml(e.entryId);
       return '<tr>' +
-        '<td><strong>' + escapeHtml(e.truckPlate) + '</strong></td>' +
-        '<td>' + escapeHtml(e.driverName) + '</td>' +
-        '<td>' + escapeHtml(e.phoneNumber) + '</td>' +
+        '<td><strong>' + escapeHtml(e.truckPlate) + '</strong> ' +
+          '<button class="btn-icon edit-entry-btn" data-id="' + id + '" data-type="pipeline" title="Edit"><i class="fa-solid fa-pen"></i></button></td>' +
+        '<td>' + urduWrap(e.driverName) + cnicRefSub(e.cnic, e.reference) + '</td>' +
+        '<td>' + displayPhone(e.phoneNumber) + '</td>' +
         '<td><span class="status-pill ' + statusClass(stage) + '">' + stage + '</span></td>' +
         '<td>' + formatDate(e.bookedTime) + '</td>' +
         '<td>' + (e.autoApproved ? '<span class="status-pill active">Auto</span>' : '—') + '</td>' +
@@ -1160,7 +1417,9 @@
       driverName: driverName,
       phoneNumber: phoneNumber,
       address: address,
-      bookingFee: fee || '50'
+      bookingFee: fee || '50',
+      cnic: $('#wCnic') ? $('#wCnic').value.trim() : '',
+      reference: $('#wReference') ? $('#wReference').value.trim() : ''
     };
     
     try {
@@ -1244,11 +1503,11 @@
       const tbody = $('#distAllTbody');
       if (!entries.length) { tbody.innerHTML = '<tr><td colspan="11" class="empty-state">No entries yet</td></tr>'; return; }
       tbody.innerHTML = entries.map(e => {
-        const phoneLink = e.phoneNumber ? '<a href="tel:' + escapeHtml(e.phoneNumber) + '" class="btn-icon" title="Call"><i class="fa-solid fa-phone"></i></a>' : '—';
+        const phoneLink = e.phoneNumber ? '<a href="tel:' + displayPhone(e.phoneNumber) + '" class="btn-icon" title="Call"><i class="fa-solid fa-phone"></i></a>' : '—';
         return '<tr>' +
           '<td><strong>' + escapeHtml(e.truckPlate) + '</strong></td>' +
-          '<td>' + escapeHtml(e.driverName) + '</td>' +
-          '<td>' + escapeHtml(e.phoneNumber) + '</td>' +
+          '<td>' + urduWrap(e.driverName) + cnicRefSub(e.cnic, e.reference) + '</td>' +
+          '<td>' + displayPhone(e.phoneNumber) + '</td>' +
           '<td>' + escapeHtml(e.shopName || e.weightmanName || '—') + '</td>' +
           '<td><span class="status-pill ' + statusClass(e.stage) + '">' + escapeHtml(e.stage || 'Pending') + '</span></td>' +
           '<td>' + formatDate(e.bookedTime) + '</td>' +
@@ -1279,6 +1538,7 @@
       const res = await callAppsScript('getDistributorList', {});
       const entries = (res && (res.data || res.entries)) || [];
       distApprovedCache = entries;
+      cachePipelineEntries(entries);
       // Diagnostic: if backend explicitly rejected access, surface why
       if (res && res.success === false) {
         const tbody = $('#distListTbody');
@@ -1311,12 +1571,12 @@
     }
     tbody.innerHTML = entries.map(e => {
       const id = escapeHtml(e.entryId);
-      const phoneLink = e.phoneNumber ? '<a href="tel:' + escapeHtml(e.phoneNumber) + '" class="btn-icon" title="Call"><i class="fa-solid fa-phone"></i></a>' : '—';
+      const phoneLink = e.phoneNumber ? '<a href="tel:' + displayPhone(e.phoneNumber) + '" class="btn-icon" title="Call"><i class="fa-solid fa-phone"></i></a>' : '—';
       return '<tr data-id="' + id + '">' +
         '<td><input type="checkbox" class="dist-check" data-id="' + id + '" /></td>' +
         '<td><strong>' + escapeHtml(e.truckPlate) + '</strong></td>' +
-        '<td>' + escapeHtml(e.driverName) + '</td>' +
-        '<td>' + escapeHtml(e.phoneNumber) + '</td>' +
+        '<td>' + urduWrap(e.driverName) + cnicRefSub(e.cnic, e.reference) + '</td>' +
+        '<td>' + displayPhone(e.phoneNumber) + '</td>' +
         '<td>' + escapeHtml(e.shopName || e.weightmanName || '—') + '</td>' +
         '<td>' + escapeHtml(e.weightmanName || '—') + '</td>' +
         '<td>' + formatDate(e.bookedTime) + '</td>' +
@@ -1537,10 +1797,10 @@
           '<div class="user-detail-item"><label>Status</label><p>' + escapeHtml(user.status) + '</p></div>' +
         '</div></div>' +
         '<div class="user-detail-section"><h4>Operator Entries (' + entries.length + ')</h4>' +
-          (entries.length ? '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Plate</th><th>Driver</th><th>Phone</th><th>Status</th><th>Date</th></tr></thead><tbody>' + entries.map(e => '<tr><td>' + escapeHtml(e.TruckPlate) + '</td><td>' + escapeHtml(e.DriverName) + '</td><td>' + escapeHtml(e.PhoneNumber) + '</td><td><span class="status-pill ' + statusClass(e.Status) + '">' + escapeHtml(e.Status) + '</span></td><td>' + formatDate(e.Timestamp) + '</td></tr>').join('') + '</tbody></table></div>' : '<p class="muted">No entries</p>') +
+          (entries.length ? '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Plate</th><th>Driver</th><th>Phone</th><th>Status</th><th>Date</th></tr></thead><tbody>' + entries.map(e => '<tr><td>' + escapeHtml(e.TruckPlate) + '</td><td>' + urduWrap(e.DriverName) + '</td><td>' + displayPhone(e.PhoneNumber) + '</td><td><span class="status-pill ' + statusClass(e.Status) + '">' + escapeHtml(e.Status) + '</span></td><td>' + formatDate(e.Timestamp) + '</td></tr>').join('') + '</tbody></table></div>' : '<p class="muted">No entries</p>') +
         '</div>' +
         '<div class="user-detail-section"><h4>Weight Entries (' + weightEntries.length + ')</h4>' +
-          (weightEntries.length ? '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Plate</th><th>Driver</th><th>Phone</th><th>Status</th><th>Date</th></tr></thead><tbody>' + weightEntries.map(e => '<tr><td>' + escapeHtml(e.TruckPlate) + '</td><td>' + escapeHtml(e.DriverName) + '</td><td>' + escapeHtml(e.PhoneNumber) + '</td><td><span class="status-pill ' + statusClass(e.Status) + '">' + escapeHtml(e.Status) + '</span></td><td>' + formatDate(e.Timestamp) + '</td></tr>').join('') + '</tbody></table></div>' : '<p class="muted">No weight entries</p>') +
+          (weightEntries.length ? '<div class="table-wrapper"><table class="data-table"><thead><tr><th>Plate</th><th>Driver</th><th>Phone</th><th>Status</th><th>Date</th></tr></thead><tbody>' + weightEntries.map(e => '<tr><td>' + escapeHtml(e.TruckPlate) + '</td><td>' + urduWrap(e.DriverName) + '</td><td>' + displayPhone(e.PhoneNumber) + '</td><td><span class="status-pill ' + statusClass(e.Status) + '">' + escapeHtml(e.Status) + '</span></td><td>' + formatDate(e.Timestamp) + '</td></tr>').join('') + '</tbody></table></div>' : '<p class="muted">No weight entries</p>') +
         '</div>';
       $('#userDetailModal').hidden = false;
     } catch (err) { toast('Failed: ' + err.message, 'error'); }
@@ -1565,6 +1825,7 @@
       const res = await callAppsScript('getPipeline', { stageFilter: 'Pending' });
       let entries = (res && (res.data || res.entries)) || [];
       entries.sort((a, b) => new Date(a.bookedTime || 0) - new Date(b.bookedTime || 0));
+      cachePipelineEntries(entries);
       if (dataChanged('pending', entries)) renderPendingEntries(entries);
     } catch (err) { toast('Load failed: ' + err.message, 'error'); }
   };
@@ -1588,14 +1849,14 @@
         '<td><input type="checkbox" class="pending-check" data-id="' + id + '" /></td>' +
         '<td><strong>' + (idx + 1) + '</strong></td>' +
         '<td><strong>' + escapeHtml(e.truckPlate) + '</strong></td>' +
-        '<td>' + escapeHtml(e.driverName) + '</td>' +
-        '<td>' + escapeHtml(e.phoneNumber) + '</td>' +
+        '<td>' + urduWrap(e.driverName) + cnicRefSub(e.cnic, e.reference) + '</td>' +
+        '<td>' + displayPhone(e.phoneNumber) + '</td>' +
         '<td>' + escapeHtml(e.shopName || e.weightmanName || '—') + '</td>' +
         '<td><span class="status-pill pending">Pending</span></td>' +
         '<td>' + formatDate(e.bookedTime) + '</td>' +
         '<td>' + escapeHtml(e.address || '—') + '</td>' +
         '<td>' + escapeHtml(e.bookingFee || '—') + '</td>' +
-        '<td class="actions-cell">—</td>' +
+        '<td class="actions-cell"><button class="btn-icon edit-entry-btn" data-id="' + id + '" data-type="pipeline" title="Edit"><i class="fa-solid fa-pen"></i></button></td>' +
       '</tr>';
     }).join('');
   };
@@ -1665,6 +1926,7 @@
       const res = await callAppsScript('getPipeline', { stageFilter: 'Approved' });
       let entries = (res && (res.data || res.entries)) || [];
       entries.sort((a, b) => new Date(a.approvedTime || 0) - new Date(b.approvedTime || 0));
+      cachePipelineEntries(entries);
       if (dataChanged('approved', entries)) renderApprovedList(entries);
     } catch (err) { toast('Load failed: ' + err.message, 'error'); }
   };
@@ -1678,12 +1940,12 @@
       return '<tr data-id="' + id + '">' +
         '<td><input type="checkbox" class="approved-check" data-id="' + id + '" /></td>' +
         '<td><strong>' + escapeHtml(e.truckPlate) + '</strong>' + sentBadge + '</td>' +
-        '<td>' + escapeHtml(e.driverName) + '</td>' +
-        '<td>' + escapeHtml(e.phoneNumber) + '</td>' +
+        '<td>' + urduWrap(e.driverName) + cnicRefSub(e.cnic, e.reference) + '</td>' +
+        '<td>' + displayPhone(e.phoneNumber) + '</td>' +
         '<td>' + escapeHtml(e.shopName || e.weightmanName || '—') + '</td>' +
         '<td>' + formatDate(e.bookedTime) + '</td>' +
         '<td>' + formatDate(e.approvedTime) + '</td>' +
-        '<td class="actions-cell"><button class="btn btn-warning btn-sm set-loading-single-btn" data-id="' + id + '"><i class="fa-solid fa-truck-loading"></i> Loading</button></td>' +
+        '<td class="actions-cell"><button class="btn-icon edit-entry-btn" data-id="' + id + '" data-type="pipeline" title="Edit"><i class="fa-solid fa-pen"></i></button> <button class="btn btn-warning btn-sm set-loading-single-btn" data-id="' + id + '"><i class="fa-solid fa-truck-loading"></i> Loading</button></td>' +
       '</tr>';
     }).join('');
   };
@@ -1732,6 +1994,7 @@
       const res = await callAppsScript('getPipeline', { stageFilter: 'Loading' });
       let entries = (res && (res.data || res.entries)) || [];
       entries.sort((a, b) => new Date(a.loadingTime || 0) - new Date(b.loadingTime || 0));
+      cachePipelineEntries(entries);
       const tbody = $('#loadingTbody');
       if (!entries.length) { tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No entries in loading queue</td></tr>'; return; }
       tbody.innerHTML = entries.map((e, idx) => {
@@ -1739,8 +2002,8 @@
         return '<tr>' +
           '<td><strong>' + (idx + 1) + '</strong></td>' +
           '<td><strong>' + escapeHtml(e.truckPlate) + '</strong></td>' +
-          '<td>' + escapeHtml(e.driverName) + '</td>' +
-          '<td>' + escapeHtml(e.phoneNumber) + '</td>' +
+          '<td>' + urduWrap(e.driverName) + cnicRefSub(e.cnic, e.reference) + '</td>' +
+          '<td>' + displayPhone(e.phoneNumber) + '</td>' +
           '<td>' + escapeHtml(e.shopName || e.weightmanName || '—') + '</td>' +
           '<td>' + formatDate(e.bookedTime) + '</td>' +
           '<td>' + formatDate(e.approvedTime) + '</td>' +
@@ -1757,14 +2020,15 @@
       const res = await callAppsScript('getPipeline', { stageFilter: 'Transit' });
       let entries = (res && (res.data || res.entries)) || [];
       entries.sort((a, b) => new Date(a.transitTime || 0) - new Date(b.transitTime || 0));
+      cachePipelineEntries(entries);
       const tbody = $('#transitTbody');
       if (!entries.length) { tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No entries in transit</td></tr>'; return; }
       tbody.innerHTML = entries.map(e => {
         const id = escapeHtml(e.entryId);
         return '<tr>' +
           '<td><strong>' + escapeHtml(e.truckPlate) + '</strong></td>' +
-          '<td>' + escapeHtml(e.driverName) + '</td>' +
-          '<td>' + escapeHtml(e.phoneNumber) + '</td>' +
+          '<td>' + urduWrap(e.driverName) + cnicRefSub(e.cnic, e.reference) + '</td>' +
+          '<td>' + displayPhone(e.phoneNumber) + '</td>' +
           '<td>' + escapeHtml(e.shopName || e.weightmanName || '—') + '</td>' +
           '<td>' + formatDate(e.bookedTime) + '</td>' +
           '<td>' + formatDate(e.approvedTime) + '</td>' +
@@ -1804,14 +2068,15 @@
       const res = await callAppsScript('getPipeline', { stageFilter: 'Delivered' });
       let entries = (res && (res.data || res.entries)) || [];
       entries.sort((a, b) => new Date(b.deliveredTime || 0) - new Date(a.deliveredTime || 0));
+      cachePipelineEntries(entries);
       const tbody = $('#deliveredTbody');
       if (!entries.length) { tbody.innerHTML = '<tr><td colspan="10" class="empty-state">No delivered entries</td></tr>'; return; }
       tbody.innerHTML = entries.map(e => {
         const id = escapeHtml(e.entryId);
         return '<tr>' +
           '<td><strong>' + escapeHtml(e.truckPlate) + '</strong></td>' +
-          '<td>' + escapeHtml(e.driverName) + '</td>' +
-          '<td>' + escapeHtml(e.phoneNumber) + '</td>' +
+          '<td>' + urduWrap(e.driverName) + cnicRefSub(e.cnic, e.reference) + '</td>' +
+          '<td>' + displayPhone(e.phoneNumber) + '</td>' +
           '<td>' + escapeHtml(e.shopName || e.weightmanName || '—') + '</td>' +
           '<td>' + formatDate(e.bookedTime) + '</td>' +
           '<td>' + formatDate(e.approvedTime) + '</td>' +
@@ -1848,8 +2113,8 @@
       tbody.innerHTML = entries.map(e => {
         return '<tr>' +
           '<td><strong>' + escapeHtml(e.truckPlate) + '</strong></td>' +
-          '<td>' + escapeHtml(e.driverName) + '</td>' +
-          '<td>' + escapeHtml(e.phoneNumber) + '</td>' +
+          '<td>' + urduWrap(e.driverName) + cnicRefSub(e.cnic, e.reference) + '</td>' +
+          '<td>' + displayPhone(e.phoneNumber) + '</td>' +
           '<td>' + escapeHtml(e.shopName || e.weightmanName || '—') + '</td>' +
           '<td>' + escapeHtml(e.bookingFee || '—') + '</td>' +
           '<td>' + formatDate(e.bookedTime) + '</td>' +
@@ -1998,8 +2263,8 @@
     const tbody = $('#globalTbody');
     if (!entries.length) { tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No entries</td></tr>'; return; }
     tbody.innerHTML = entries.map(e => {
-      const phoneLink = e.PhoneNumber ? '<a href="tel:' + escapeHtml(e.PhoneNumber) + '" class="phone-link"><i class="fa-solid fa-phone"></i></a>' : '';
-      return '<tr><td><strong>' + escapeHtml(e.TruckPlate || '—') + '</strong></td><td>' + escapeHtml(e.DriverName || '—') + '</td><td>' + escapeHtml(e.PhoneNumber || '—') + ' ' + phoneLink + '</td><td>' + escapeHtml(e.Address || '—') + '</td><td>' + escapeHtml(e.OperatorName || '—') + '</td><td><span class="status-pill ' + statusClass(e.Status) + '">' + escapeHtml(e.Status || 'Pending') + '</span></td><td>' + formatDate(e.PendingTime || e.Timestamp) + '</td><td>' + formatDate(e.TransitTime) + '</td><td>' + formatDate(e.DeliveredTime) + '</td></tr>';
+      const phoneLink = e.PhoneNumber ? '<a href="tel:' + displayPhone(e.PhoneNumber) + '" class="phone-link"><i class="fa-solid fa-phone"></i></a>' : '';
+      return '<tr><td><strong>' + escapeHtml(e.TruckPlate || '—') + '</strong></td><td>' + urduWrap(e.DriverName) + '</td><td>' + displayPhone(e.PhoneNumber) + ' ' + phoneLink + '</td><td>' + escapeHtml(e.Address || '—') + '</td><td>' + escapeHtml(e.OperatorName || '—') + '</td><td><span class="status-pill ' + statusClass(e.Status) + '">' + escapeHtml(e.Status || 'Pending') + '</span></td><td>' + formatDate(e.PendingTime || e.Timestamp) + '</td><td>' + formatDate(e.TransitTime) + '</td><td>' + formatDate(e.DeliveredTime) + '</td></tr>';
     }).join('');
   };
 
@@ -2057,7 +2322,17 @@
   };
 
   // ============ PRINT ============
-  const handlePrint = () => { window.print(); };
+  const handlePrint = () => {
+    // Print only the currently-active view's table, full page (not the whole UI with sidebar)
+    const activeView = document.querySelector('.screen:not([hidden]) .view.active');
+    if (activeView && activeView.id) {
+      const titleEl = activeView.querySelector('h3');
+      const title = titleEl ? titleEl.textContent.trim() : 'TMS Report';
+      printSpecificTable(activeView.id, title);
+    } else {
+      window.print();
+    }
+  };
 
   // Point 4: Print/PDF + Search toolbar injected onto every admin view
   // (Users, Pending, Approved, Loading, Transit, Delivered, Record Room)
@@ -2076,25 +2351,85 @@
     const table = view.querySelector('table');
     if (!table) { toast('Nothing to print on this page', 'warning'); return; }
 
+    // Clone the table so we can strip unwanted columns without touching the live page
+    const clone = table.cloneNode(true);
+
+    // Find header indices to drop: "Status" column, the checkbox/select column, and "Actions"
+    const headerRow = clone.querySelector('thead tr');
+    const dropIdx = [];
+    if (headerRow) {
+      const ths = Array.from(headerRow.children);
+      ths.forEach((th, idx) => {
+        const txt = (th.textContent || '').trim().toLowerCase();
+        const hasCheckbox = th.querySelector('input[type="checkbox"]');
+        if (txt === 'status' || txt === 'actions' || hasCheckbox || txt === '') {
+          dropIdx.push(idx);
+        }
+      });
+    }
+
+    // Remove the flagged columns from header + every body row (highest index first)
+    if (dropIdx.length) {
+      const sorted = dropIdx.slice().sort((a, b) => b - a);
+      const allRows = Array.from(clone.querySelectorAll('tr'));
+      allRows.forEach(row => {
+        // skip date-group header rows that use colspan
+        if (row.querySelector('td[colspan]')) return;
+        const cells = Array.from(row.children);
+        sorted.forEach(i => { if (cells[i]) cells[i].remove(); });
+      });
+      // Fix the colspan on any date-group header rows to match the new column count
+      const newColCount = clone.querySelectorAll('thead tr th').length;
+      clone.querySelectorAll('td[colspan]').forEach(td => {
+        td.setAttribute('colspan', String(Math.max(1, newColCount)));
+      });
+    }
+
     const printWindow = window.open('', '_blank');
     printWindow.document.write(
       '<html><head><title>' + escapeHtml(title) + '</title>' +
+      '<link href="https://fonts.googleapis.com/css2?family=Noto+Nastaliq+Urdu:wght@400;700&display=swap" rel="stylesheet">' +
       '<style>' +
-      'body{font-family:Arial,sans-serif;padding:20px;}' +
-      'h2{margin-bottom:4px;} p{color:#666;margin-top:0;margin-bottom:16px;font-size:12px;}' +
-      'table{width:100%;border-collapse:collapse;font-size:12px;}' +
-      'th,td{border:1px solid #ccc;padding:6px 8px;text-align:left;}' +
-      'th{background:#f3f4f6;}' +
-      '.actions-cell, th:last-child, td:last-child{display:none;}' + // hide action buttons column in print
+      '@page { size: A4 landscape; margin: 12mm; }' +
+      '* { box-sizing: border-box; }' +
+      'html, body { margin: 0; padding: 0; }' +
+      'body { font-family: Arial, sans-serif; padding: 0; }' +
+      'h2 { margin: 0 0 4px 0; font-size: 18px; }' +
+      'p.print-sub { color:#666; margin:0 0 12px 0; font-size:12px; }' +
+      'table { width:100%; border-collapse:collapse; font-size:12px; table-layout:auto; }' +
+      'thead { display: table-header-group; }' + // repeat header on each printed page
+      'tfoot { display: table-footer-group; }' +
+      'th, td { border:1px solid #999; padding:6px 8px; text-align:left; vertical-align:top; word-wrap:break-word; }' +
+      'th { background:#e8edff; font-weight:700; }' +
+      'tr { page-break-inside: avoid; }' + // a single row never splits across pages
+      // Urdu text (Arabic-script chars) gets the Nastaliq font automatically
+      'td:lang(ur), .urdu { font-family: "Noto Nastaliq Urdu", "Jameel Noori Nastaleeq", serif; font-size: 15px; line-height: 2; }' +
+      '.status-buttons, .status-btn { display:none !important; }' + // safety: hide any stray status buttons
       '</style></head><body>' +
       '<h2>' + escapeHtml(title) + '</h2>' +
-      '<p>Printed on ' + new Date().toLocaleString() + '</p>' +
-      table.outerHTML +
+      '<p class="print-sub">Printed on ' + new Date().toLocaleString() + '</p>' +
+      wrapUrduCells(clone.outerHTML) +
       '</body></html>'
     );
     printWindow.document.close();
     printWindow.focus();
-    setTimeout(() => { printWindow.print(); }, 300);
+    // Wait a moment for the Urdu webfont to load before printing
+    setTimeout(() => { printWindow.print(); }, 700);
+  };
+
+  // Detects table cells that contain Arabic-script (Urdu) text and tags them so the
+  // Nastaliq font applies in print. Operates on the HTML string of the table.
+  const wrapUrduCells = (tableHtml) => {
+    const urduRegex = /[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]/;
+    // Add lang="ur" to any <td> whose text content contains Urdu/Arabic characters
+    return tableHtml.replace(/<td([^>]*)>([\s\S]*?)<\/td>/g, (match, attrs, inner) => {
+      if (urduRegex.test(inner)) {
+        // avoid duplicating lang attr
+        if (/lang=/.test(attrs)) return match;
+        return '<td' + attrs + ' lang="ur">' + inner + '</td>';
+      }
+      return match;
+    });
   };
 
   // Injects a search box + Print/PDF button into a view's .view-header (or creates one)
@@ -2229,12 +2564,15 @@
     injectAllAdminToolbars();
     injectAdminViewToolbar('recordView', 'Record Room');
     injectAdminViewToolbar('distRequestsView', 'Distributor Requests');
+    injectEditModal();
 
     document.addEventListener('click', (e) => {
       const fulfillBtn = e.target.closest('.fulfill-request-btn');
       if (fulfillBtn) handleFulfillDistRequest(fulfillBtn.dataset.id);
       const delDeliveredBtn = e.target.closest('.delete-delivered-btn');
       if (delDeliveredBtn) handleDeleteDeliveredEntry(delDeliveredBtn.dataset.id);
+      const editBtn = e.target.closest('.edit-entry-btn');
+      if (editBtn) openEditModal(editBtn.dataset.id, editBtn.dataset.type);
     });
 
     $('#usersTbody').addEventListener('click', (e) => {
