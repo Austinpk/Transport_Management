@@ -176,11 +176,19 @@
                 <label for="bookingFee">Booking Fee (Optional)</label>
                 <input type="text" id="bookingFee" placeholder="e.g. 500 PKR" />
               </div>
+              <div class="form-group">
+                <label for="cnic">CNIC (Optional)</label>
+                <input type="text" id="cnic" placeholder="e.g. 35202-1234567-1" autocomplete="off" />
+              </div>
+              <div class="form-group">
+                <label for="reference">حوالہ / Reference (Optional)</label>
+                <input type="text" id="reference" placeholder="Reference / guarantor name" autocomplete="off" />
+              </div>
             </div>
             <div class="form-group sms-group">
               <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
                 <input type="checkbox" id="sendSms" style="width:18px;height:18px;accent-color:var(--primary);" />
-                <span><i class="fa-solid fa-message"></i> Send SMS to driver (Urdu): "آپ کی بلٹی بک ہو گئی ہے۔ بکنگ فیس: [fee]۔ ہماری ٹرانسپورٹ سروس استعمال کرنے کا شکریہ۔"</span>
+                <span><i class="fa-solid fa-message"></i> Send SMS to driver (Urdu): "آپ کی بھٹی بک ہو گئی ہے۔ بکنگ فیس: [fee]۔ ہماری ٹرانسپورٹ سروس استعمال کرنے کا شکریہ۔"</span>
               </label>
             </div>
             <div class="form-actions">
@@ -281,6 +289,14 @@
     <div class="form-group">
       <label for="wAddress">Address (Optional)</label>
       <input type="text" id="wAddress" placeholder="Location" />
+    </div>
+    <div class="form-group">
+      <label for="wCnic">CNIC (Optional)</label>
+      <input type="text" id="wCnic" placeholder="e.g. 35202-1234567-1" autocomplete="off" />
+    </div>
+    <div class="form-group">
+      <label for="wReference">حوالہ / Reference (Optional)</label>
+      <input type="text" id="wReference" placeholder="Reference / guarantor name" autocomplete="off" />
     </div>
   </div>
   <div class="form-actions">
